@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>通用标注平台</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="title">
+          <div class="h1">通用标注平台</div>
+          <div class="sub" id="metaLine">加载中…</div>
+        </div>
+        <div class="actions">
+          <div class="saveModeCtl">
+            <span class="fieldLbl">存盘模式</span>
+            <select id="saveModeSel" title="auto：每次修改自动写入工作文件；manual：手动点击保存">
+              <option value="manual">手动</option>
+              <option value="auto">自动</option>
+            </select>
+          </div>
+          <button id="templateBtn" type="button">模版设置</button>
+          <button id="saveBtn" class="primary">保存到文件</button>
+        </div>
+      </header>
+
+      <div class="shell" id="shell">
+        <aside class="sidebar" id="sidebar" aria-label="case 列表">
+          <div class="sidebarHead">
+            <div class="sidebarTitle">Case 列表</div>
+            <button id="sidebarToggle" type="button" class="iconBtn" aria-expanded="true" title="收起/展开侧边栏">
+              收起
+            </button>
+          </div>
+
+          <div class="listPane">
+            <div class="listFilters">
+              <input id="q" type="text" placeholder="搜索（回车确认）" />
+              <select id="filterChanged" title="按是否已修改筛选">
+                <option value="any">全部</option>
+                <option value="yes">已修改</option>
+                <option value="no">未修改</option>
+              </select>
+              <select id="pageSize" title="每页条数">
+                <option value="20">20/页</option>
+                <option value="30" selected>30/页</option>
+                <option value="50">50/页</option>
+                <option value="100">100/页</option>
+              </select>
+            </div>
+            <div class="listHeader">
+              <div id="listSummary">—</div>
+              <div class="pager">
+                <button id="prevBtn">上一页</button>
+                <button id="nextBtn">下一页</button>
+              </div>
+            </div>
+            <div id="list" class="list"></div>
+          </div>
+        </aside>
+
+        <main class="workspace" id="workspace">
+          <!-- 标注视图 -->
+          <section class="detailPane" id="annotateView">
+            <div class="detailHeader">
+              <div class="h2" id="detailTitle">标注工作区</div>
+              <div class="detailActions">
+                <button id="addFieldBtn" type="button" title="给当前记录新增一个 key">+ 新增字段</button>
+                <button id="applyBtn" class="primary">保存此条</button>
+              </div>
+            </div>
+            <div class="detailScroll">
+              <div id="detailEmpty" class="empty">请在左侧选择一条记录</div>
+              <div id="detail" class="detail hidden">
+                <div id="fieldsContainer"></div>
+                <div id="applyMsg" class="msg"></div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 模版设置视图 -->
+          <section class="detailPane hidden" id="templateView">
+            <div class="detailHeader">
+              <div class="h2">模版设置</div>
+              <div class="detailActions">
+                <button id="tplRegenBtn" type="button" title="根据当前数据重新自动解析字段">重新解析字段</button>
+                <button id="tplSaveBtn" class="primary">保存模版</button>
+              </div>
+            </div>
+            <div class="detailScroll">
+              <div class="tplSection">
+                <div class="tplSectionTitle">全局设置</div>
+                <div class="tplGlobal">
+                  <div class="control">
+                    <label for="tplTitleField">列表标题字段</label>
+                    <select id="tplTitleField"></select>
+                  </div>
+                  <div class="control">
+                    <label for="tplSubtitleField">列表副标题字段</label>
+                    <select id="tplSubtitleField"></select>
+                  </div>
+                  <div class="control">
+                    <label for="tplTagField">列表标签字段</label>
+                    <select id="tplTagField"></select>
+                  </div>
+                  <div class="control">
+                    <label for="tplSaveMode">存盘模式</label>
+                    <select id="tplSaveMode">
+                      <option value="manual">手动（点击"保存到文件"才写盘）</option>
+                      <option value="auto">自动（每次修改立即写入工作文件）</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="tplHint" id="tplPathHint"></div>
+              </div>
+
+              <div class="tplSection">
+                <div class="tplSectionTitle">字段配置（拖动手柄调整顺序）</div>
+                <div class="tplTableHead">
+                  <div></div>
+                  <div>key</div>
+                  <div>显示名</div>
+                  <div>控件</div>
+                  <div>高度(行)</div>
+                  <div>选项（select 用，每行一个）</div>
+                  <div>可改</div>
+                  <div>隐藏</div>
+                  <div></div>
+                </div>
+                <div id="tplFields"></div>
+                <button id="tplAddFieldBtn" type="button" class="tplAddBtn">+ 添加字段</button>
+              </div>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

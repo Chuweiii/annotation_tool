@@ -1,0 +1,97 @@
+{
+  "version": 1,
+  "source_file": "sample_data.jsonl",
+  "generated_at": "2026-07-09 20:53:32",
+  "save_mode": "manual",
+  "list": {
+    "title_field": "id",
+    "subtitle_field": "title",
+    "tag_field": "category"
+  },
+  "search_fields": [
+    "id",
+    "title",
+    "category",
+    "content",
+    "note"
+  ],
+  "fields": [
+    {
+      "key": "id",
+      "label": "id",
+      "widget": "text",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    },
+    {
+      "key": "title",
+      "label": "title",
+      "widget": "text",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    },
+    {
+      "key": "category",
+      "label": "category",
+      "widget": "select",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": [
+        "contract",
+        "labor",
+        "loan",
+        "tort"
+      ]
+    },
+    {
+      "key": "content",
+      "label": "content",
+      "widget": "textarea",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    },
+    {
+      "key": "score",
+      "label": "score",
+      "widget": "number",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    },
+    {
+      "key": "reviewed",
+      "label": "reviewed",
+      "widget": "checkbox",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    },
+    {
+      "key": "tags",
+      "label": "tags",
+      "widget": "json",
+      "rows": 10,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    },
+    {
+      "key": "note",
+      "label": "note",
+      "widget": "text",
+      "rows": 4,
+      "editable": true,
+      "hidden": false,
+      "options": []
+    }
+  ]
+}
