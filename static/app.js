@@ -8,6 +8,7 @@ const state = {
   total: 0,
   q: "",
   filterChanged: "any",
+  dataFilters: {},
   selectedIndex: null,
   currentRow: null,       // 当前记录的原始数据
   deletedKeys: new Set(), // 本条待删除的 key
@@ -80,7 +81,94 @@ function buildRowsUrl() {
   p.set("limit", String(state.limit));
   p.set("changed", state.filterChanged);
   if (state.q) p.set("q", state.q);
+  if (Object.keys(state.dataFilters).length) {
+    p.set("filters", JSON.stringify(state.dataFilters));
+  }
   return `/api/rows?${p.toString()}`;
+}
+
+function renderDataFilters() {
+  const box = $("dataFilters");
+  box.innerHTML = "";
+  const fields = (state.template?.fields || []).filter((f) => f.filterable);
+  const allowed = new Set(fields.map((f) => f.key));
+  for (const key of Object.keys(state.dataFilters)) {
+    if (!allowed.has(key)) delete state.dataFilters[key];
+  }
+  if (!fields.length) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+
+  for (const spec of fields) {
+    const control = document.createElement("div");
+    control.className = "dataFilter";
+    const label = document.createElement("label");
+    label.textContent = spec.label || spec.key;
+    label.title = spec.key;
+
+    let input;
+    if (spec.widget === "select" || spec.widget === "checkbox") {
+      input = document.createElement("select");
+      const choices = spec.widget === "checkbox"
+        ? [["", "全部"], ["true", "是"], ["false", "否"]]
+        : [["", "全部"], ...(spec.options || []).map((v) => [v, v])];
+      for (const [value, text] of choices) {
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = text;
+        input.appendChild(option);
+      }
+      const current = state.dataFilters[spec.key];
+      input.value = spec.widget === "checkbox" && typeof current === "boolean"
+        ? String(current)
+        : (current ?? "");
+    } else {
+      input = document.createElement("input");
+      input.type = spec.widget === "number" ? "number" : "text";
+      input.placeholder = spec.widget === "number" ? "精确值" : "包含文本";
+      input.value = state.dataFilters[spec.key] ?? "";
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") applyDataFilter(spec, input.value);
+      });
+    }
+    input.addEventListener("change", () => applyDataFilter(spec, input.value));
+    control.appendChild(label);
+    control.appendChild(input);
+    box.appendChild(control);
+  }
+
+  if (Object.keys(state.dataFilters).length) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "clearFiltersBtn";
+    clear.textContent = "清空筛选";
+    clear.addEventListener("click", async () => {
+      state.dataFilters = {};
+      state.offset = 0;
+      renderDataFilters();
+      await refreshList();
+    });
+    box.appendChild(clear);
+  }
+}
+
+async function applyDataFilter(spec, rawValue) {
+  if (rawValue === "") {
+    delete state.dataFilters[spec.key];
+  } else if (spec.widget === "checkbox") {
+    state.dataFilters[spec.key] = rawValue === "true";
+  } else if (spec.widget === "number") {
+    const value = Number(rawValue);
+    if (Number.isNaN(value)) return;
+    state.dataFilters[spec.key] = value;
+  } else {
+    state.dataFilters[spec.key] = rawValue;
+  }
+  state.offset = 0;
+  renderDataFilters();
+  await refreshList();
 }
 
 function renderList(items) {
@@ -288,6 +376,7 @@ function renderDetail() {
       // 数据中缺失该 key：也展示出来方便补标
     }
     const el = makeFieldEditor(spec, row[spec.key]);
+    if (spec.side_by_side) el.classList.add("sideBySide");
     if (state.deletedKeys.has(spec.key)) {
       el.classList.add("deleted");
       const btn = el.querySelector(".fieldDelBtn");
@@ -562,6 +651,18 @@ function makeTplFieldRow(f, i) {
   hidden.checked = Boolean(f.hidden);
   hidden.addEventListener("change", () => { f.hidden = hidden.checked; });
 
+  const sideBySide = document.createElement("input");
+  sideBySide.type = "checkbox";
+  sideBySide.checked = Boolean(f.side_by_side);
+  sideBySide.title = "相邻的勾选字段在工作区中左右两列排列";
+  sideBySide.addEventListener("change", () => { f.side_by_side = sideBySide.checked; });
+
+  const filterable = document.createElement("input");
+  filterable.type = "checkbox";
+  filterable.checked = Boolean(f.filterable);
+  filterable.title = "在左侧列表中提供该字段的筛选控件";
+  filterable.addEventListener("change", () => { f.filterable = filterable.checked; });
+
   const del = document.createElement("button");
   del.type = "button";
   del.className = "tplDelBtn";
@@ -580,6 +681,8 @@ function makeTplFieldRow(f, i) {
   row.appendChild(options);
   row.appendChild(wrapCenter(editable));
   row.appendChild(wrapCenter(hidden));
+  row.appendChild(wrapCenter(sideBySide));
+  row.appendChild(wrapCenter(filterable));
   row.appendChild(del);
 
   // 拖拽排序
@@ -640,6 +743,7 @@ async function saveTemplate() {
   try {
     const r = await apiJson("PUT", "/api/template", tpl);
     state.template = tpl;
+    renderDataFilters();
     toast("模版已保存：" + r.template_path, "ok", 3000);
     await refreshMeta();
     await refreshList();
@@ -656,6 +760,8 @@ async function regenerateTemplate() {
     state.template = r.template;
     state.tplDraft = JSON.parse(JSON.stringify(r.template));
     renderTemplateEditor();
+    state.dataFilters = {};
+    renderDataFilters();
     toast("已重新解析并保存模版");
     await refreshList();
   } catch (e) {
@@ -745,6 +851,8 @@ function wire() {
       rows: 4,
       editable: true,
       hidden: false,
+      side_by_side: false,
+      filterable: false,
       options: [],
     });
     renderTemplateEditor();
@@ -762,6 +870,7 @@ async function main() {
   setSidebarCollapsed(collapsed);
 
   state.template = await apiGet("/api/template");
+  renderDataFilters();
   const meta = await apiGet("/api/meta");
   $("tplPathHint").textContent = `模版文件：${meta.template_path}（可随代码/数据一起归档，实现复现）`;
   await refreshMeta();

@@ -37,18 +37,21 @@
 
           <div class="listPane">
             <div class="listFilters">
-              <input id="q" type="text" placeholder="搜索（回车确认）" />
-              <select id="filterChanged" title="按是否已修改筛选">
-                <option value="any">全部</option>
-                <option value="yes">已修改</option>
-                <option value="no">未修改</option>
-              </select>
-              <select id="pageSize" title="每页条数">
-                <option value="20">20/页</option>
-                <option value="30" selected>30/页</option>
-                <option value="50">50/页</option>
-                <option value="100">100/页</option>
-              </select>
+              <div class="listFilterRow">
+                <input id="q" type="text" placeholder="全文搜索（回车确认）" />
+                <select id="filterChanged" title="按是否已修改筛选">
+                  <option value="any">全部</option>
+                  <option value="yes">已修改</option>
+                  <option value="no">未修改</option>
+                </select>
+                <select id="pageSize" title="每页条数">
+                  <option value="20">20/页</option>
+                  <option value="30" selected>30/页</option>
+                  <option value="50">50/页</option>
+                  <option value="100">100/页</option>
+                </select>
+              </div>
+              <div id="dataFilters" class="dataFilters"></div>
             </div>
             <div class="listHeader">
               <div id="listSummary">—</div>
@@ -127,6 +130,8 @@
                   <div>选项（select 用，每行一个）</div>
                   <div>可改</div>
                   <div>隐藏</div>
+                  <div title="相邻的勾选字段将在工作区中两列排列">左右</div>
+                  <div title="在左侧 case 列表中提供该字段的筛选控件">筛选</div>
                   <div></div>
                 </div>
                 <div id="tplFields"></div>

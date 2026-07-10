@@ -156,12 +156,26 @@ input::placeholder{color:rgba(71, 85, 105, 0.55)}
   flex-direction: column;
 }
 .listFilters{
-  display:flex;gap:8px;
+  display:flex;flex-direction:column;gap:8px;
   padding:10px;border-bottom:1px solid var(--border);
   background: rgba(243, 246, 251, 0.95);
 }
-.listFilters input{flex:1;min-width:0;padding:8px 10px}
-.listFilters select{padding:8px 6px}
+.listFilterRow{display:flex;gap:8px}
+.listFilterRow input{flex:1;min-width:0;padding:8px 10px}
+.listFilterRow select{padding:8px 6px}
+.dataFilters{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:7px;
+  padding-top:8px;
+  border-top:1px solid var(--border);
+}
+.dataFilter{display:flex;flex-direction:column;gap:3px;min-width:0}
+.dataFilter label{
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.dataFilter input,.dataFilter select{width:100%;min-width:0;padding:7px 8px}
+.clearFiltersBtn{padding:7px 9px;font-size:12px;align-self:end}
 .listHeader{
   display:flex;align-items:center;justify-content:space-between;
   padding:10px 12px;border-bottom:1px solid var(--border);
@@ -237,14 +251,20 @@ input::placeholder{color:rgba(71, 85, 105, 0.55)}
 .msg{min-height:20px;color:var(--muted);font-size:12px;margin-top:8px;word-break:break-all}
 
 /* ---- 标注字段 ---- */
+#fieldsContainer{
+  display:grid;
+  grid-template-columns:repeat(2, minmax(0, 1fr));
+  gap:12px;
+}
 .field{
-  margin-bottom:12px;
+  grid-column:1 / -1;
   padding:10px 12px;
   border:1px solid rgba(15, 23, 42, 0.10);
   border-radius:14px;
   background: rgba(255,255,255,.85);
   display:flex;flex-direction:column;gap:8px;
 }
+.field.sideBySide{grid-column:auto}
 .field.deleted{opacity:.5;background:rgba(225, 29, 72, 0.05);border-color:rgba(225, 29, 72, 0.3)}
 .fieldHead{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .fieldLabel{font-weight:700;font-size:13px}
@@ -270,6 +290,7 @@ input.chk{
   align-self:flex-start;
 }
 .extraDivider{
+  grid-column:1 / -1;
   margin:18px 0 10px;
   color:var(--muted);font-size:12px;font-weight:700;
   display:flex;align-items:center;gap:10px;
@@ -286,7 +307,7 @@ input.chk{
 
 .tplTableHead,.tplRow{
   display:grid;
-  grid-template-columns: 26px 1.1fr 1fr 100px 70px 1.4fr 44px 44px 60px;
+  grid-template-columns: 26px 1.1fr 1fr 92px 64px 1.3fr 40px 40px 40px 40px 56px;
   gap:8px;
   align-items:center;
 }
@@ -334,4 +355,9 @@ input.chk{
   .list{max-height:42vh}
   .tplTableHead{display:none}
   .tplRow{grid-template-columns: 1fr 1fr}
+}
+
+@media (max-width: 720px){
+  #fieldsContainer{grid-template-columns:1fr}
+  .field.sideBySide{grid-column:1}
 }

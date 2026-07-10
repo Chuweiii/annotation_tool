@@ -155,6 +155,8 @@ def infer_field(key: str, values: List[Any]) -> Dict[str, Any]:
         "rows": 4,
         "editable": True,
         "hidden": False,
+        "side_by_side": False,
+        "filterable": False,
         "options": [],
     }
     non_null = [v for v in values if v is not None]
@@ -220,7 +222,7 @@ def generate_template(dataset: Dataset) -> Dict[str, Any]:
     search_fields = [f["key"] for f in fields if f["widget"] in ("text", "textarea", "select")]
 
     return {
-        "version": 1,
+        "version": 2,
         "source_file": dataset.path.name,
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "save_mode": "manual",  # manual | auto
@@ -265,6 +267,10 @@ def validate_template(tpl: Any) -> Optional[str]:
             return f"fields[{i}].editable 必须是布尔值"
         if not isinstance(f.get("hidden", False), bool):
             return f"fields[{i}].hidden 必须是布尔值"
+        if not isinstance(f.get("side_by_side", False), bool):
+            return f"fields[{i}].side_by_side 必须是布尔值"
+        if not isinstance(f.get("filterable", False), bool):
+            return f"fields[{i}].filterable 必须是布尔值"
         if not isinstance(f.get("options", []), list):
             return f"fields[{i}].options 必须是数组"
     lst = tpl.get("list")
@@ -391,14 +397,45 @@ def make_app() -> Flask:
             return jsonify({"error": "changed must be any|yes|no"}), 400
 
         search_fields = template.get("search_fields") or []
+        filter_specs = {
+            f["key"]: f
+            for f in template.get("fields", [])
+            if f.get("filterable", False)
+        }
+        try:
+            filters = json.loads(request.args.get("filters") or "{}")
+        except json.JSONDecodeError:
+            return jsonify({"error": "filters must be a JSON object"}), 400
+        if not isinstance(filters, dict):
+            return jsonify({"error": "filters must be a JSON object"}), 400
+        unknown_filters = set(filters) - set(filter_specs)
+        if unknown_filters:
+            return jsonify({
+                "error": f"fields are not configured as filterable: {sorted(unknown_filters)}"
+            }), 400
+
+        def matches_filter(actual: Any, expected: Any, spec: Dict[str, Any]) -> bool:
+            widget = spec.get("widget")
+            if widget in {"select", "checkbox", "number"}:
+                return actual == expected
+            if actual is None:
+                return False
+            if isinstance(actual, str):
+                text = actual
+            else:
+                text = json.dumps(actual, ensure_ascii=False)
+            return str(expected).lower() in text.lower()
 
         def match(idx: int) -> bool:
             if changed == "yes" and idx not in dataset.dirty_rows:
                 return False
             if changed == "no" and idx in dataset.dirty_rows:
                 return False
+            row = dataset.rows[idx]
+            for key, expected in filters.items():
+                if not matches_filter(row.get(key), expected, filter_specs[key]):
+                    return False
             if q:
-                row = dataset.rows[idx]
                 keys = search_fields if search_fields else list(row.keys())
                 blob = "\n".join(
                     v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
