@@ -1,6 +1,7 @@
 const $ = (id) => document.getElementById(id);
 
 const WIDGETS = ["text", "textarea", "number", "checkbox", "select", "json"];
+const LABELLED_FIELD = "is_labelled";
 
 const state = {
   offset: 0,
@@ -15,6 +16,7 @@ const state = {
   extraKeys: [],          // 本条新增的、模版之外的 key
   template: null,
   tplDraft: null,         // 模版编辑器中的草稿
+  templateLibrary: null,
   autoSaveTimer: null,
 };
 
@@ -70,9 +72,50 @@ function setSidebarCollapsed(collapsed) {
 
 async function refreshMeta() {
   const m = await apiGet("/api/meta");
+  const workingPath = m.working_path || "首次保存时生成时间戳文件";
   $("metaLine").textContent =
-    `${m.total} 条 | 已修改 ${m.dirty_count} 条 | 数据: ${m.data_path} | 工作文件: ${m.working_path}`;
+    `${m.total} 条 | 已标注 ${m.dirty_count} 条 | 数据: ${m.data_path} | 工作文件: ${workingPath}`;
   $("saveModeSel").value = m.save_mode;
+  if ($("tplPathHint")) {
+    $("tplPathHint").textContent = `当前模版文件：${m.template_path}（可随代码/数据一起归档，实现复现）`;
+  }
+}
+
+async function chooseSession() {
+  const info = await apiGet("/api/resume-options");
+  if (!info.versions.length) {
+    await apiJson("POST", "/api/session/select", { action: "restart" });
+    return;
+  }
+
+  const choices = info.versions.map((v, i) => {
+    const savedAt = new Date(v.modified_at_ms).toLocaleString();
+    return `${i + 1}. ${v.name}（${savedAt}）`;
+  });
+  const message = [
+    `检测到 ${info.source_path} 的历史标注存档：`,
+    "",
+    "0. 重新开始",
+    ...choices,
+    "",
+    "请输入编号；取消也将重新开始。",
+  ].join("\n");
+  const answer = window.prompt(message, "1");
+  const index = answer === null ? 0 : Number.parseInt(answer.trim(), 10);
+
+  if (index === 0) {
+    await apiJson("POST", "/api/session/select", { action: "restart" });
+    return;
+  }
+  if (Number.isInteger(index) && index >= 1 && index <= info.versions.length) {
+    await apiJson("POST", "/api/session/select", {
+      action: "resume",
+      name: info.versions[index - 1].name,
+    });
+    return;
+  }
+  window.alert("编号无效，请重新选择。");
+  return chooseSession();
 }
 
 function buildRowsUrl() {
@@ -207,7 +250,7 @@ function renderList(items) {
     if (it.dirty) {
       const d = document.createElement("div");
       d.className = "tag dirty";
-      d.textContent = "已修改";
+      d.textContent = "已标注";
       tags.appendChild(d);
     }
 
@@ -281,7 +324,7 @@ function makeFieldEditor(spec, value) {
     ro.className = "roBadge";
     ro.textContent = "只读";
     headRight.appendChild(ro);
-  } else {
+  } else if (spec.key !== LABELLED_FIELD) {
     const del = document.createElement("button");
     del.type = "button";
     del.className = "fieldDelBtn";
@@ -518,23 +561,34 @@ function scheduleAutoSave() {
   state.autoSaveTimer = window.setTimeout(() => applyCurrent({ silent: true }), 800);
 }
 
-function addFieldToCurrent() {
+async function addFieldToCurrent() {
   if (state.selectedIndex === null) {
     toast("请先选择一条记录", "err");
     return;
   }
-  const key = window.prompt("新字段的 key：");
+  const raw = window.prompt("新字段的 key：");
+  if (!raw) return;
+  const key = raw.trim();
   if (!key) return;
-  if (key in state.currentRow || state.extraKeys.includes(key)) {
-    toast("该 key 已存在", "err");
-    return;
-  }
-  state.extraKeys.push(key);
-  renderDetail();
-  const el = $("fieldsContainer").querySelector(`.field[data-key="${CSS.escape(key)}"]`);
-  if (el) {
-    el.scrollIntoView({ behavior: "smooth", block: "center" });
-    el.querySelector(".fieldInput")?.focus();
+  try {
+    const r = await apiJson("POST", "/api/key/add", { key });
+    if (!(key in state.currentRow)) state.currentRow[key] = null;
+    state.extraKeys = state.extraKeys.filter((k) => k !== key);
+    renderDetail();
+    const el = $("fieldsContainer").querySelector(`.field[data-key="${CSS.escape(key)}"]`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.querySelector(".fieldInput")?.focus();
+    }
+    if (r.auto_saved_path) {
+      toast(`新增字段已全局生效并写盘：${r.auto_saved_path}`, "ok", 3500);
+    } else {
+      toast("新增字段已全局生效（缺失值填 null）");
+    }
+    await refreshMeta();
+    await refreshList();
+  } catch (e) {
+    toast("新增字段失败：" + (e?.message ?? String(e)), "err", 3500);
   }
 }
 
@@ -548,12 +602,55 @@ function showAnnotateView() {
   $("templateBtn").textContent = "模版设置";
 }
 
-function showTemplateView() {
+async function showTemplateView() {
   state.tplDraft = JSON.parse(JSON.stringify(state.template));
   renderTemplateEditor();
+  await refreshTemplateLibrary();
   $("annotateView").classList.add("hidden");
   $("templateView").classList.remove("hidden");
   $("templateBtn").textContent = "返回标注";
+}
+
+function displayTemplateName(name) {
+  return name.replace(/\.template\.json$/, "");
+}
+
+async function refreshTemplateLibrary() {
+  const library = await apiGet("/api/templates");
+  state.templateLibrary = library;
+  renderTemplateLibrary();
+}
+
+function renderTemplateLibrary() {
+  const library = state.templateLibrary;
+  const sel = $("tplPicker");
+  sel.innerHTML = "";
+  if (!library?.templates?.length) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "暂无可复用模版";
+    sel.appendChild(empty);
+    $("tplUseBtn").disabled = true;
+    $("tplLibraryHint").textContent = "保存当前模版或另存为新模版后，会出现在这里。";
+    return;
+  }
+
+  $("tplUseBtn").disabled = false;
+  for (const item of library.templates) {
+    const op = document.createElement("option");
+    op.value = item.name;
+    const tags = [];
+    if (item.is_current) tags.push("当前");
+    if (item.is_default) tags.push("当前数据默认");
+    if (item.source_file) tags.push(`来源: ${item.source_file}`);
+    if (item.error) tags.push(`不可用: ${item.error}`);
+    op.textContent = `${displayTemplateName(item.name)}${tags.length ? `（${tags.join("；")}）` : ""}`;
+    op.disabled = Boolean(item.error);
+    sel.appendChild(op);
+  }
+  sel.value = library.current;
+  $("tplLibraryHint").textContent =
+    `当前使用：${displayTemplateName(library.current)}；默认同名模版：${displayTemplateName(library.default)}`;
 }
 
 function fillFieldSelect(sel, keys, current, allowEmpty = true) {
@@ -719,7 +816,7 @@ function wrapCenter(el) {
   return d;
 }
 
-async function saveTemplate() {
+function prepareTemplateDraft() {
   const tpl = state.tplDraft;
   tpl.list = tpl.list || {};
   tpl.list.title_field = $("tplTitleField").value;
@@ -733,23 +830,81 @@ async function saveTemplate() {
   const keys = tpl.fields.map((f) => f.key);
   if (keys.some((k) => !k)) {
     toast("存在空的 key", "err");
-    return;
+    return null;
   }
   if (new Set(keys).size !== keys.length) {
     toast("存在重复的 key", "err");
-    return;
+    return null;
   }
+  return tpl;
+}
 
+async function saveTemplate() {
+  const tpl = prepareTemplateDraft();
+  if (!tpl) return;
   try {
     const r = await apiJson("PUT", "/api/template", tpl);
     state.template = tpl;
     renderDataFilters();
     toast("模版已保存：" + r.template_path, "ok", 3000);
     await refreshMeta();
+    await refreshTemplateLibrary();
     await refreshList();
     if (state.selectedIndex !== null) renderDetail();
   } catch (e) {
     toast("模版保存失败：" + (e?.message ?? String(e)), "err", 4000);
+  }
+}
+
+async function applySelectedTemplate() {
+  const name = $("tplPicker").value;
+  if (!name) return;
+  const current = state.templateLibrary?.current;
+  if (name !== current && !window.confirm("套用已有模版会替换当前字段配置视图，未保存的模版编辑会丢失。确定？")) {
+    return;
+  }
+  try {
+    const r = await apiJson("POST", "/api/template/select", { name });
+    state.template = r.template;
+    state.tplDraft = JSON.parse(JSON.stringify(r.template));
+    state.dataFilters = {};
+    renderTemplateEditor();
+    renderDataFilters();
+    toast("已套用模版：" + r.template_path, "ok", 3000);
+    await refreshMeta();
+    await refreshTemplateLibrary();
+    await refreshList();
+    if (state.selectedIndex !== null) renderDetail();
+  } catch (e) {
+    toast("套用模版失败：" + (e?.message ?? String(e)), "err", 4000);
+  }
+}
+
+async function saveTemplateAs() {
+  const tpl = prepareTemplateDraft();
+  if (!tpl) return;
+  const currentName = state.templateLibrary?.current || "";
+  const baseName = displayTemplateName(currentName || "custom_template");
+  const raw = window.prompt("新模版名称（会保存到 annotation_templates/，可不写后缀）：", baseName);
+  if (raw === null) return;
+  const name = raw.trim();
+  if (!name) {
+    toast("模版名称不能为空", "err");
+    return;
+  }
+  try {
+    const r = await apiJson("POST", "/api/template/save-as", { name, template: tpl });
+    state.template = r.template;
+    state.tplDraft = JSON.parse(JSON.stringify(r.template));
+    renderTemplateEditor();
+    renderDataFilters();
+    toast("已另存为模版：" + r.template_path, "ok", 3000);
+    await refreshMeta();
+    await refreshTemplateLibrary();
+    await refreshList();
+    if (state.selectedIndex !== null) renderDetail();
+  } catch (e) {
+    toast("另存模版失败：" + (e?.message ?? String(e)), "err", 4000);
   }
 }
 
@@ -763,6 +918,8 @@ async function regenerateTemplate() {
     state.dataFilters = {};
     renderDataFilters();
     toast("已重新解析并保存模版");
+    await refreshMeta();
+    await refreshTemplateLibrary();
     await refreshList();
   } catch (e) {
     toast("重新解析失败：" + (e?.message ?? String(e)), "err", 4000);
@@ -837,12 +994,16 @@ function wire() {
   });
 
   $("templateBtn").addEventListener("click", () => {
-    if ($("templateView").classList.contains("hidden")) showTemplateView();
+    if ($("templateView").classList.contains("hidden")) {
+      showTemplateView().catch((e) => toast("打开模版设置失败：" + (e?.message ?? String(e)), "err", 4000));
+    }
     else showAnnotateView();
   });
 
   $("tplSaveBtn").addEventListener("click", saveTemplate);
   $("tplRegenBtn").addEventListener("click", regenerateTemplate);
+  $("tplUseBtn").addEventListener("click", applySelectedTemplate);
+  $("tplSaveAsBtn").addEventListener("click", saveTemplateAs);
   $("tplAddFieldBtn").addEventListener("click", () => {
     state.tplDraft.fields.push({
       key: "",
@@ -869,10 +1030,10 @@ async function main() {
   } catch {}
   setSidebarCollapsed(collapsed);
 
+  await chooseSession();
   state.template = await apiGet("/api/template");
+  await refreshTemplateLibrary();
   renderDataFilters();
-  const meta = await apiGet("/api/meta");
-  $("tplPathHint").textContent = `模版文件：${meta.template_path}（可随代码/数据一起归档，实现复现）`;
   await refreshMeta();
   await refreshList();
 }

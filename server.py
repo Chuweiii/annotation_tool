@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -22,6 +23,7 @@ ENUM_MAX_LEN = 40            # 枚举候选值的最大长度
 LONG_TEXT_MIN_LEN = 120      # 超过该长度（或含换行）的字符串 -> textarea
 
 WIDGETS = {"text", "textarea", "number", "checkbox", "select", "json"}
+LABELLED_FIELD = "is_labelled"
 
 
 # ---------------------------------------------------------------------------
@@ -30,18 +32,39 @@ WIDGETS = {"text", "textarea", "number", "checkbox", "select", "json"}
 
 @dataclass
 class Dataset:
-    path: Path            # 启动时加载的文件
+    path: Path            # 原始数据文件
     fmt: str              # "jsonl" | "json"
     rows: List[Dict[str, Any]]
     loaded_at_ms: int
     dirty_rows: Set[int] = field(default_factory=set)  # 本次会话中被修改过的行
+    working_path: Optional[Path] = None  # 当前选中的 output 存档
 
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def load_data(path: Path) -> Dataset:
+def normalize_labelled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "labelled", "labeled", "已标注"}
+    return False
+
+
+def init_label_state(rows: List[Dict[str, Any]]) -> Set[int]:
+    labelled: Set[int] = set()
+    for i, row in enumerate(rows):
+        is_labelled = normalize_labelled(row.get(LABELLED_FIELD, False))
+        row[LABELLED_FIELD] = is_labelled
+        if is_labelled:
+            labelled.add(i)
+    return labelled
+
+
+def load_data(path: Path, source_path: Optional[Path] = None) -> Dataset:
     text = path.read_text(encoding="utf-8")
     rows: List[Dict[str, Any]] = []
     if path.suffix.lower() == ".jsonl":
@@ -66,7 +89,14 @@ def load_data(path: Path) -> Dataset:
                 rows.append(item)
         else:
             raise ValueError(f"Unsupported top-level JSON type: {type(obj).__name__}")
-    return Dataset(path=path, fmt=fmt, rows=rows, loaded_at_ms=_now_ms())
+    return Dataset(
+        path=source_path or path,
+        fmt=fmt,
+        rows=rows,
+        loaded_at_ms=_now_ms(),
+        dirty_rows=init_label_state(rows),
+        working_path=path if source_path else None,
+    )
 
 
 def atomic_write_data(path: Path, dataset: Dataset) -> None:
@@ -86,8 +116,7 @@ def pick_startup_data_path() -> Path:
     选择启动时加载的数据文件，优先级：
     1) 命令行参数
     2) ANNOTATION_DATA_PATH 环境变量
-    3) output/ 下最新的 *_edited* 工作文件（继续上次的标注）
-    4) 项目目录下的 *.jsonl / *.json（不含 output/、annotation_templates/）
+    3) 项目目录下的 *.jsonl / *.json（不含 output/、annotation_templates/）
     """
     def resolve(p: str) -> Path:
         q = Path(p)
@@ -106,15 +135,6 @@ def pick_startup_data_path() -> Path:
             return p
         raise FileNotFoundError(f"ANNOTATION_DATA_PATH not found: {p}")
 
-    if OUTPUT_DIR.exists():
-        edited = [
-            p for p in list(OUTPUT_DIR.glob("*_edited*.jsonl")) + list(OUTPUT_DIR.glob("*_edited*.json"))
-            if p.is_file()
-        ]
-        if edited:
-            edited.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            return edited[0]
-
     candidates = [
         p for p in list(APP_DIR.glob("*.jsonl")) + list(APP_DIR.glob("*.json"))
         if p.is_file()
@@ -128,18 +148,32 @@ def pick_startup_data_path() -> Path:
     )
 
 
-def working_path_for(dataset: Dataset) -> Path:
-    """自动/手动存盘写入的工作文件（不覆盖原始文件）。"""
-    if dataset.path.parent == OUTPUT_DIR and "_edited" in dataset.path.stem:
-        return dataset.path
-    return OUTPUT_DIR / f"{dataset.path.stem}_edited{dataset.path.suffix}"
+def timestamped_working_path(dataset: Dataset) -> Path:
+    """生成带微秒时间戳的工作文件名。"""
+    now_ns = time.time_ns()
+    base = time.strftime("%Y%m%d_%H%M%S", time.localtime(now_ns / 1_000_000_000))
+    micros = (now_ns // 1000) % 1_000_000
+    return OUTPUT_DIR / f"{source_stem(dataset)}_{base}_{micros:06d}{dataset.path.suffix}"
+
+
+def output_versions_for(source_path: Path) -> List[Path]:
+    """查找指定原始文件对应的所有时间戳存档，最新的排在前面。"""
+    if not OUTPUT_DIR.exists():
+        return []
+    pattern = re.compile(
+        rf"^{re.escape(source_path.stem)}_(\d{{8}}_\d{{6}}(?:_\d{{3}}|_\d{{6}})?)"
+        rf"{re.escape(source_path.suffix)}$"
+    )
+    versions = [
+        p for p in OUTPUT_DIR.iterdir()
+        if p.is_file() and pattern.fullmatch(p.name)
+    ]
+    versions.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+    return versions
 
 
 def source_stem(dataset: Dataset) -> str:
-    stem = dataset.path.stem
-    if "_edited" in stem:
-        stem = stem.split("_edited")[0]
-    return stem
+    return dataset.path.stem
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +274,67 @@ def template_path_for(dataset: Dataset) -> Path:
     return TEMPLATE_DIR / f"{source_stem(dataset)}.template.json"
 
 
+def normalize_template_name(name: Any) -> Optional[str]:
+    if not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name:
+        return None
+    if name.endswith(".template.json"):
+        stem = name[: -len(".template.json")]
+    elif name.endswith(".json"):
+        stem = name[: -len(".json")]
+        if stem.endswith(".template"):
+            stem = stem[: -len(".template")]
+    else:
+        stem = name
+    if not stem or "/" in stem or "\\" in stem or stem in {".", ".."}:
+        return None
+    if not re.fullmatch(r"[\w\u4e00-\u9fff.-]+", stem):
+        return None
+    return f"{stem}.template.json"
+
+
+def template_path_from_name(name: Any) -> Optional[Path]:
+    filename = normalize_template_name(name)
+    if filename is None:
+        return None
+    return TEMPLATE_DIR / filename
+
+
+def template_files() -> List[Path]:
+    if not TEMPLATE_DIR.exists():
+        return []
+    templates = [
+        p for p in TEMPLATE_DIR.glob("*.template.json")
+        if p.is_file() and template_path_from_name(p.name) == p
+    ]
+    templates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return templates
+
+
+def template_info(path: Path, current_path: Path, default_path: Path) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "name": path.name,
+        "path": str(path),
+        "source_file": "",
+        "modified_at_ms": int(path.stat().st_mtime * 1000),
+        "is_current": path == current_path,
+        "is_default": path == default_path,
+    }
+    try:
+        tpl = json.loads(path.read_text(encoding="utf-8"))
+        source_file = tpl.get("source_file")
+        if isinstance(source_file, str):
+            info["source_file"] = source_file
+        err = validate_template(tpl)
+        if err:
+            info["error"] = err
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
 def validate_template(tpl: Any) -> Optional[str]:
     """返回错误信息；合法则返回 None。"""
     if not isinstance(tpl, dict):
@@ -282,21 +377,45 @@ def validate_template(tpl: Any) -> Optional[str]:
     return None
 
 
-def load_or_create_template(dataset: Dataset) -> Dict[str, Any]:
-    path = template_path_for(dataset)
-    if path.exists():
-        tpl = json.loads(path.read_text(encoding="utf-8"))
-        err = validate_template(tpl)
-        if err is None:
-            return tpl
-        print(f"[warn] 模版文件不合法（{err}），已重新生成: {path}")
-    tpl = generate_template(dataset)
-    save_template(dataset, tpl)
+def ensure_label_field(tpl: Dict[str, Any]) -> Dict[str, Any]:
+    fields = tpl.setdefault("fields", [])
+    if not any(f.get("key") == LABELLED_FIELD for f in fields):
+        fields.append({
+            "key": LABELLED_FIELD,
+            "label": "已标注",
+            "widget": "checkbox",
+            "rows": 1,
+            "editable": True,
+            "hidden": False,
+            "side_by_side": False,
+            "filterable": True,
+            "options": [],
+        })
     return tpl
 
 
-def save_template(dataset: Dataset, tpl: Dict[str, Any]) -> Path:
+def load_template_file(path: Path) -> Dict[str, Any]:
+    tpl = json.loads(path.read_text(encoding="utf-8"))
+    err = validate_template(tpl)
+    if err:
+        raise ValueError(err)
+    return ensure_label_field(tpl)
+
+
+def load_or_create_template(dataset: Dataset) -> tuple[Dict[str, Any], Path]:
     path = template_path_for(dataset)
+    if path.exists():
+        try:
+            return load_template_file(path), path
+        except ValueError as e:
+            print(f"[warn] 模版文件不合法（{e}），已重新生成: {path}")
+    tpl = generate_template(dataset)
+    tpl = ensure_label_field(tpl)
+    save_template(tpl, path)
+    return tpl, path
+
+
+def save_template(tpl: Dict[str, Any], path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(tpl, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -311,7 +430,7 @@ def save_template(dataset: Dataset, tpl: Dict[str, Any]) -> Path:
 def make_app() -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="/static")
     dataset = load_data(pick_startup_data_path())
-    template = load_or_create_template(dataset)
+    template, current_template_path = load_or_create_template(dataset)
 
     def stringify(v: Any, max_len: int = 120) -> str:
         if v is None:
@@ -336,9 +455,37 @@ def make_app() -> Flask:
         }
 
     def persist() -> Path:
-        out = working_path_for(dataset)
-        atomic_write_data(out, dataset)
-        return out
+        old_path = dataset.working_path
+        new_path = timestamped_working_path(dataset)
+        if old_path is None:
+            atomic_write_data(new_path, dataset)
+        else:
+            atomic_write_data(old_path, dataset)
+            if old_path != new_path:
+                os.replace(old_path, new_path)
+        dataset.working_path = new_path
+        return new_path
+
+    def sync_template_keys_to_rows(tpl: Dict[str, Any]) -> int:
+        """将模版字段全局补齐到所有行（缺失值填 None）。"""
+        keys = [
+            f.get("key")
+            for f in tpl.get("fields", [])
+            if isinstance(f, dict) and isinstance(f.get("key"), str) and f.get("key")
+        ]
+        if not keys:
+            return 0
+        filled = 0
+        for row in dataset.rows:
+            for k in keys:
+                if k not in row:
+                    row[k] = None
+                    filled += 1
+        return filled
+
+    startup_filled = sync_template_keys_to_rows(template)
+    if startup_filled > 0:
+        print(f"[info] 启动时按模版补齐缺失 key: {startup_filled}")
 
     @app.get("/")
     def index():
@@ -349,12 +496,54 @@ def make_app() -> Flask:
         return jsonify({
             "data_path": str(dataset.path),
             "data_format": dataset.fmt,
-            "working_path": str(working_path_for(dataset)),
-            "template_path": str(template_path_for(dataset)),
+            "working_path": str(dataset.working_path) if dataset.working_path else None,
+            "template_path": str(current_template_path),
+            "default_template_path": str(template_path_for(dataset)),
             "loaded_at_ms": dataset.loaded_at_ms,
             "total": len(dataset.rows),
             "dirty_count": len(dataset.dirty_rows),
             "save_mode": template.get("save_mode", "manual"),
+        })
+
+    @app.get("/api/resume-options")
+    def resume_options():
+        versions = output_versions_for(dataset.path)
+        return jsonify({
+            "source_path": str(dataset.path),
+            "versions": [
+                {
+                    "name": p.name,
+                    "path": str(p),
+                    "modified_at_ms": int(p.stat().st_mtime * 1000),
+                }
+                for p in versions
+            ],
+        })
+
+    @app.post("/api/session/select")
+    def select_session():
+        nonlocal dataset, template, current_template_path
+        body = request.get_json(silent=True) or {}
+        action = body.get("action")
+        source_path = dataset.path
+        if action == "restart":
+            dataset = load_data(source_path)
+        elif action == "resume":
+            name = body.get("name")
+            selected = next(
+                (p for p in output_versions_for(source_path) if p.name == name),
+                None,
+            )
+            if selected is None:
+                return jsonify({"error": "所选存档不存在或不属于当前原始文件"}), 404
+            dataset = load_data(selected, source_path=source_path)
+        else:
+            return jsonify({"error": "action 必须是 restart 或 resume"}), 400
+        template, current_template_path = load_or_create_template(dataset)
+        return jsonify({
+            "ok": True,
+            "data_path": str(dataset.path),
+            "working_path": str(dataset.working_path) if dataset.working_path else None,
         })
 
     # ---------------- 模版 ----------------
@@ -363,6 +552,18 @@ def make_app() -> Flask:
     def get_template():
         return jsonify(template)
 
+    @app.get("/api/templates")
+    def list_templates():
+        default_path = template_path_for(dataset)
+        return jsonify({
+            "current": current_template_path.name,
+            "default": default_path.name,
+            "templates": [
+                template_info(p, current_template_path, default_path)
+                for p in template_files()
+            ],
+        })
+
     @app.put("/api/template")
     def put_template():
         nonlocal template
@@ -370,16 +571,80 @@ def make_app() -> Flask:
         err = validate_template(body)
         if err:
             return jsonify({"error": err}), 400
-        template = body
-        path = save_template(dataset, template)
-        return jsonify({"ok": True, "template_path": str(path)})
+        template = ensure_label_field(body)
+        filled = sync_template_keys_to_rows(template)
+        path = save_template(template, current_template_path)
+        saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
+        return jsonify({
+            "ok": True,
+            "template_path": str(path),
+            "filled_count": filled,
+            "auto_saved_path": saved_path,
+        })
+
+    @app.post("/api/template/select")
+    def select_template():
+        nonlocal template, current_template_path
+        body = request.get_json(silent=True) or {}
+        path = template_path_from_name(body.get("name"))
+        if path is None:
+            return jsonify({"error": "模版名不合法"}), 400
+        if not path.exists():
+            return jsonify({"error": "模版不存在"}), 404
+        try:
+            selected = load_template_file(path)
+        except (json.JSONDecodeError, ValueError) as e:
+            return jsonify({"error": f"模版文件不合法: {e}"}), 400
+        template = selected
+        current_template_path = path
+        filled = sync_template_keys_to_rows(template)
+        saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
+        return jsonify({
+            "ok": True,
+            "template_path": str(path),
+            "template": template,
+            "filled_count": filled,
+            "auto_saved_path": saved_path,
+        })
+
+    @app.post("/api/template/save-as")
+    def save_template_as():
+        nonlocal template, current_template_path
+        body = request.get_json(silent=True) or {}
+        path = template_path_from_name(body.get("name"))
+        if path is None:
+            return jsonify({"error": "模版名只能包含中英文、数字、下划线、点和短横线"}), 400
+        tpl = body.get("template", template)
+        err = validate_template(tpl)
+        if err:
+            return jsonify({"error": err}), 400
+        template = ensure_label_field(tpl)
+        filled = sync_template_keys_to_rows(template)
+        current_template_path = save_template(template, path)
+        saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
+        return jsonify({
+            "ok": True,
+            "template_path": str(current_template_path),
+            "template": template,
+            "filled_count": filled,
+            "auto_saved_path": saved_path,
+        })
 
     @app.post("/api/template/generate")
     def regenerate_template():
         nonlocal template
         template = generate_template(dataset)
-        path = save_template(dataset, template)
-        return jsonify({"ok": True, "template_path": str(path), "template": template})
+        template = ensure_label_field(template)
+        filled = sync_template_keys_to_rows(template)
+        path = save_template(template, current_template_path)
+        saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
+        return jsonify({
+            "ok": True,
+            "template_path": str(path),
+            "template": template,
+            "filled_count": filled,
+            "auto_saved_path": saved_path,
+        })
 
     # ---------------- 数据行 ----------------
 
@@ -471,6 +736,8 @@ def make_app() -> Flask:
         deletes = body.get("delete") or []
         if not isinstance(sets, dict) or not isinstance(deletes, list):
             return jsonify({"error": "body must be {set: object, delete: array}"}), 400
+        if LABELLED_FIELD in [d for d in deletes if isinstance(d, str)]:
+            return jsonify({"error": f"字段不可删除: {LABELLED_FIELD}"}), 400
         if not sets and not deletes:
             return jsonify({"error": "nothing to change"}), 400
 
@@ -494,7 +761,16 @@ def make_app() -> Flask:
 
         saved_path = None
         if changed:
-            dataset.dirty_rows.add(idx)
+            touched_non_label = any(k != LABELLED_FIELD for k in sets) or any(
+                isinstance(k, str) and k != LABELLED_FIELD for k in deletes
+            )
+            if touched_non_label and LABELLED_FIELD not in sets:
+                row[LABELLED_FIELD] = True
+            row[LABELLED_FIELD] = normalize_labelled(row.get(LABELLED_FIELD, False))
+            if row[LABELLED_FIELD]:
+                dataset.dirty_rows.add(idx)
+            else:
+                dataset.dirty_rows.discard(idx)
             if template.get("save_mode") == "auto":
                 saved_path = str(persist())
 
@@ -503,6 +779,33 @@ def make_app() -> Flask:
             "changed": changed,
             "auto_saved_path": saved_path,
             "item": row_summary(idx),
+        })
+
+    @app.post("/api/key/add")
+    def add_key_global():
+        body = request.get_json(silent=True) or {}
+        key = body.get("key")
+        if not isinstance(key, str) or not key.strip():
+            return jsonify({"error": "key must be a non-empty string"}), 400
+        key = key.strip()
+        if key == LABELLED_FIELD:
+            return jsonify({"error": f"字段已保留: {LABELLED_FIELD}"}), 400
+
+        filled = 0
+        for row in dataset.rows:
+            if key not in row:
+                row[key] = None
+                filled += 1
+
+        saved_path = None
+        if filled > 0 and template.get("save_mode") == "auto":
+            saved_path = str(persist())
+
+        return jsonify({
+            "ok": True,
+            "key": key,
+            "filled_count": filled,
+            "auto_saved_path": saved_path,
         })
 
     # ---------------- 存盘 ----------------

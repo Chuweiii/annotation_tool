@@ -302,6 +302,8 @@ input.chk{
 /* ---- 模版编辑器 ---- */
 .tplSection{padding:12px}
 .tplSectionTitle{font-weight:800;font-size:13px;margin-bottom:10px}
+.tplLibrary{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+.tplPickerControl{min-width:min(420px, 100%);flex:1 1 420px}
 .tplGlobal{display:flex;gap:10px;flex-wrap:wrap}
 .tplHint{margin-top:8px;color:var(--muted);font-size:12px;word-break:break-all}
 
