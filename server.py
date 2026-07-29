@@ -25,6 +25,30 @@ LONG_TEXT_MIN_LEN = 120      # 超过该长度（或含换行）的字符串 -> 
 WIDGETS = {"text", "textarea", "number", "checkbox", "select", "json"}
 LABELLED_FIELD = "is_labelled"
 
+# 嵌套字段使用 "." 连接路径，如 "meta.author.name"
+PATH_SEP = "."
+EXCEL_SUFFIXES = {".xlsx", ".xls"}
+
+# 模型推理配置（参考 annotation_app.py）：
+# - api:   调用 OpenAI 兼容的远程 API（需要环境变量中的 API Key）
+# - local: 调用本地部署的 OpenAI 兼容服务（vLLM / Ollama / LM Studio 等，一般无需 Key）
+INFER_MODES: Dict[str, Dict[str, Any]] = {
+    "api": {
+        "label": "调用 API",
+        "model": "gpt-4o-2024-05-13",
+        "base_url": "https://yeysai.com/v1",
+        "api_key_env": "OPENAI_API_KEY",
+        "temperature": 0.0,
+    },
+    "local": {
+        "label": "本地模型",
+        "model": "Qwen2.5-7B-Instruct",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "api_key_env": "",
+        "temperature": 0.0,
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # 数据集
@@ -42,6 +66,115 @@ class Dataset:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _load_dotenv(dotenv_path: Path) -> None:
+    if not dotenv_path.exists():
+        return
+    for raw in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        key = k.strip()
+        val = v.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+def infer_chat(
+    mode: str,
+    model: str,
+    base_url: str,
+    temperature: float,
+    system_prompt: str,
+    user_prompt: str,
+) -> str:
+    """通过 OpenAI 兼容接口执行一次推理（远程 API 或本地服务）。"""
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("缺少 openai 包，请先安装：pip install openai") from exc
+
+    cfg = INFER_MODES[mode]
+    api_key_env = cfg.get("api_key_env") or ""
+    api_key = os.environ.get(api_key_env, "") if api_key_env else ""
+    if mode == "api" and not api_key:
+        raise RuntimeError(f"环境变量 {api_key_env} 尚未设置，无法调用 API。")
+
+    client = OpenAI(api_key=api_key or "EMPTY", base_url=base_url or None)
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": user_prompt})
+    completion = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+    )
+    return completion.choices[0].message.content or ""
+
+
+# ---------------------------------------------------------------------------
+# 嵌套路径读写：优先把 key 当作字面量（兼容 key 本身含 "." 的情况），
+# 否则按 "." 分段在嵌套 dict 中递归寻址。
+# ---------------------------------------------------------------------------
+
+def has_path(row: Dict[str, Any], path: str) -> bool:
+    if path in row:
+        return True
+    cur: Any = row
+    for part in path.split(PATH_SEP):
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    return True
+
+
+def get_path(row: Dict[str, Any], path: str) -> Any:
+    if path in row:
+        return row[path]
+    cur: Any = row
+    for part in path.split(PATH_SEP):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def set_path(row: Dict[str, Any], path: str, value: Any) -> bool:
+    """按路径写入；中间节点缺失或为 None 时自动创建 dict。写入成功返回 True。"""
+    if PATH_SEP not in path or path in row:
+        row[path] = value
+        return True
+    parts = path.split(PATH_SEP)
+    cur: Any = row
+    for part in parts[:-1]:
+        nxt = cur.get(part)
+        if nxt is None:
+            nxt = {}
+            cur[part] = nxt
+        if not isinstance(nxt, dict):
+            return False
+        cur = nxt
+    cur[parts[-1]] = value
+    return True
+
+
+def delete_path(row: Dict[str, Any], path: str) -> bool:
+    if path in row:
+        del row[path]
+        return True
+    parts = path.split(PATH_SEP)
+    cur: Any = row
+    for part in parts[:-1]:
+        if not isinstance(cur, dict) or part not in cur:
+            return False
+        cur = cur[part]
+    if isinstance(cur, dict) and parts[-1] in cur:
+        del cur[parts[-1]]
+        return True
+    return False
 
 
 def normalize_labelled(value: Any) -> bool:
@@ -64,7 +197,48 @@ def init_label_state(rows: List[Dict[str, Any]]) -> Set[int]:
     return labelled
 
 
+def _excel_cell_to_py(v: Any) -> Any:
+    """把 pandas / numpy 读出的单元格值转成可 JSON 序列化的 Python 值。"""
+    if v is None:
+        return None
+    if isinstance(v, float) and v != v:  # NaN
+        return None
+    if hasattr(v, "item"):  # numpy 标量
+        try:
+            return v.item()
+        except Exception:
+            pass
+    if isinstance(v, (str, int, float, bool, list, dict)):
+        return v
+    return str(v)  # Timestamp 等其他类型
+
+
+def load_excel_rows(path: Path) -> List[Dict[str, Any]]:
+    try:
+        import pandas as pd
+    except ImportError as exc:
+        raise RuntimeError(
+            "解析 Excel 需要 pandas 和 openpyxl：pip install pandas openpyxl"
+        ) from exc
+    df = pd.read_excel(path)
+    df = df.where(pd.notna(df), None)
+    return [
+        {str(k): _excel_cell_to_py(v) for k, v in rec.items()}
+        for rec in df.to_dict(orient="records")
+    ]
+
+
 def load_data(path: Path, source_path: Optional[Path] = None) -> Dataset:
+    if path.suffix.lower() in EXCEL_SUFFIXES:
+        rows = load_excel_rows(path)
+        return Dataset(
+            path=source_path or path,
+            fmt="excel",
+            rows=rows,
+            loaded_at_ms=_now_ms(),
+            dirty_rows=init_label_state(rows),
+            working_path=path if source_path else None,
+        )
     text = path.read_text(encoding="utf-8")
     rows: List[Dict[str, Any]] = []
     if path.suffix.lower() == ".jsonl":
@@ -102,12 +276,28 @@ def load_data(path: Path, source_path: Optional[Path] = None) -> Dataset:
 def atomic_write_data(path: Path, dataset: Dataset) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8", newline="\n") as f:
-        if dataset.fmt == "jsonl":
-            for obj in dataset.rows:
-                f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        else:
-            json.dump(dataset.rows, f, ensure_ascii=False, indent=2)
+    if dataset.fmt == "excel":
+        import pandas as pd
+        columns: List[str] = []
+        for row in dataset.rows:
+            for k in row:
+                if k not in columns:
+                    columns.append(k)
+        records = [
+            {
+                k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
+                for k, v in row.items()
+            }
+            for row in dataset.rows
+        ]
+        pd.DataFrame(records, columns=columns).to_excel(tmp, index=False, engine="openpyxl")
+    else:
+        with tmp.open("w", encoding="utf-8", newline="\n") as f:
+            if dataset.fmt == "jsonl":
+                for obj in dataset.rows:
+                    f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            else:
+                json.dump(dataset.rows, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
 
@@ -116,7 +306,7 @@ def pick_startup_data_path() -> Path:
     选择启动时加载的数据文件，优先级：
     1) 命令行参数
     2) ANNOTATION_DATA_PATH 环境变量
-    3) 项目目录下的 *.jsonl / *.json（不含 output/、annotation_templates/）
+    3) 项目目录下的 *.jsonl / *.json / *.xlsx（不含 output/、annotation_templates/）
     """
     def resolve(p: str) -> Path:
         q = Path(p)
@@ -136,7 +326,13 @@ def pick_startup_data_path() -> Path:
         raise FileNotFoundError(f"ANNOTATION_DATA_PATH not found: {p}")
 
     candidates = [
-        p for p in list(APP_DIR.glob("*.jsonl")) + list(APP_DIR.glob("*.json"))
+        p
+        for p in (
+            list(APP_DIR.glob("*.jsonl"))
+            + list(APP_DIR.glob("*.json"))
+            + list(APP_DIR.glob("*.xlsx"))
+            + list(APP_DIR.glob("*.xls"))
+        )
         if p.is_file()
     ]
     if candidates:
@@ -144,7 +340,7 @@ def pick_startup_data_path() -> Path:
         return candidates[0]
 
     raise FileNotFoundError(
-        "未找到数据文件。请通过命令行参数或 ANNOTATION_DATA_PATH 指定一个 .json/.jsonl 文件。"
+        "未找到数据文件。请通过命令行参数或 ANNOTATION_DATA_PATH 指定一个 .json/.jsonl/.xlsx 文件。"
     )
 
 
@@ -185,11 +381,12 @@ def infer_field(key: str, values: List[Any]) -> Dict[str, Any]:
     spec: Dict[str, Any] = {
         "key": key,
         "label": key,
+        "hint": "",
         "widget": "text",
         "rows": 4,
         "editable": True,
         "hidden": False,
-        "side_by_side": False,
+        "group": "",
         "filterable": False,
         "options": [],
     }
@@ -232,17 +429,60 @@ def infer_field(key: str, values: List[Any]) -> Dict[str, Any]:
     return spec
 
 
-def generate_template(dataset: Dataset) -> Dict[str, Any]:
-    """扫描全部数据，自动解析 key & value，生成默认模版。"""
-    keys: List[str] = []
-    values_by_key: Dict[str, List[Any]] = {}
-    for row in dataset.rows:
-        for k, v in row.items():
-            if k not in values_by_key:
-                keys.append(k)
-                values_by_key[k] = []
-            values_by_key[k].append(v)
+def default_infer_config() -> Dict[str, Any]:
+    api = INFER_MODES["api"]
+    return {
+        "mode": "api",
+        "model": api["model"],
+        "base_url": api["base_url"],
+        "temperature": api["temperature"],
+        "system_prompt": "",
+        "user_prompt": "",
+    }
 
+
+def collect_leaf_paths(rows: List[Dict[str, Any]]) -> tuple[List[str], Dict[str, List[Any]]]:
+    """
+    递归扫描所有行，返回叶子路径（"." 连接）及各路径的取值列表。
+    - 纯对象节点（所有非空取值都是 dict）继续下钻，不作为叶子；
+    - 混合节点（部分行是 dict、部分行是别的类型）整体当作一个 json 叶子。
+    """
+    order: List[str] = []
+    values_by_path: Dict[str, List[Any]] = {}
+    has_children: Set[str] = set()
+
+    def visit(obj: Dict[str, Any], prefix: str) -> None:
+        for k, v in obj.items():
+            path = f"{prefix}{PATH_SEP}{k}" if prefix else str(k)
+            if path not in values_by_path:
+                order.append(path)
+                values_by_path[path] = []
+            values_by_path[path].append(v)
+            if isinstance(v, dict) and v:
+                has_children.add(path)
+                visit(v, path)
+
+    for row in rows:
+        visit(row, "")
+
+    mixed = {
+        p for p in has_children
+        if any(v is not None and not isinstance(v, dict) for v in values_by_path[p])
+    }
+
+    def under_mixed(p: str) -> bool:
+        return any(p.startswith(m + PATH_SEP) for m in mixed)
+
+    leaves = [
+        p for p in order
+        if not under_mixed(p) and not (p in has_children and p not in mixed)
+    ]
+    return leaves, values_by_path
+
+
+def generate_template(dataset: Dataset) -> Dict[str, Any]:
+    """扫描全部数据，递归解析嵌套对象的 key & value，生成默认模版。"""
+    keys, values_by_key = collect_leaf_paths(dataset.rows)
     fields = [infer_field(k, values_by_key[k]) for k in keys]
 
     # 猜一个适合在左侧列表展示的字段：优先短文本字符串
@@ -256,10 +496,12 @@ def generate_template(dataset: Dataset) -> Dict[str, Any]:
     search_fields = [f["key"] for f in fields if f["widget"] in ("text", "textarea", "select")]
 
     return {
-        "version": 2,
+        "version": 3,
         "source_file": dataset.path.name,
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "save_mode": "manual",  # manual | auto
+        "infer_enabled": False,  # 是否启用模型推理（标注 + 模型验证）
+        "infer": default_infer_config(),
         "list": {
             "title_field": title_field,
             "subtitle_field": subtitle_candidates[0] if subtitle_candidates else "",
@@ -341,6 +583,8 @@ def validate_template(tpl: Any) -> Optional[str]:
         return "模版必须是 JSON 对象"
     if tpl.get("save_mode") not in ("auto", "manual"):
         return "save_mode 必须是 auto 或 manual"
+    if not isinstance(tpl.get("infer_enabled", False), bool):
+        return "infer_enabled 必须是布尔值"
     fields = tpl.get("fields")
     if not isinstance(fields, list):
         return "fields 必须是数组"
@@ -364,6 +608,10 @@ def validate_template(tpl: Any) -> Optional[str]:
             return f"fields[{i}].hidden 必须是布尔值"
         if not isinstance(f.get("side_by_side", False), bool):
             return f"fields[{i}].side_by_side 必须是布尔值"
+        if not isinstance(f.get("group", ""), str):
+            return f"fields[{i}].group 必须是字符串"
+        if not isinstance(f.get("hint", ""), str):
+            return f"fields[{i}].hint 必须是字符串"
         if not isinstance(f.get("filterable", False), bool):
             return f"fields[{i}].filterable 必须是布尔值"
         if not isinstance(f.get("options", []), list):
@@ -374,23 +622,62 @@ def validate_template(tpl: Any) -> Optional[str]:
     sf = tpl.get("search_fields", [])
     if not isinstance(sf, list) or not all(isinstance(s, str) for s in sf):
         return "search_fields 必须是字符串数组"
+    infer = tpl.get("infer")
+    if infer is not None:
+        if not isinstance(infer, dict):
+            return "infer 必须是对象"
+        if infer.get("mode", "api") not in INFER_MODES:
+            return f"infer.mode 必须是 {sorted(INFER_MODES)} 之一"
+        for k in ("model", "base_url", "system_prompt", "user_prompt"):
+            if not isinstance(infer.get(k, ""), str):
+                return f"infer.{k} 必须是字符串"
+        if not isinstance(infer.get("temperature", 0), (int, float)):
+            return "infer.temperature 必须是数字"
     return None
 
 
-def ensure_label_field(tpl: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_template(tpl: Dict[str, Any]) -> Dict[str, Any]:
+    """补齐模版默认值：保证含 is_labelled 字段、hint/group 字段属性、infer 配置。
+    旧版模版的 side_by_side 布尔标记会迁移为并列组（相邻勾选的字段归入同一组）。"""
     fields = tpl.setdefault("fields", [])
     if not any(f.get("key") == LABELLED_FIELD for f in fields):
         fields.append({
             "key": LABELLED_FIELD,
             "label": "已标注",
+            "hint": "",
             "widget": "checkbox",
             "rows": 1,
             "editable": True,
             "hidden": False,
-            "side_by_side": False,
+            "group": "",
             "filterable": True,
             "options": [],
         })
+
+    group_seq = 0
+    prev_was_side = False
+    for f in fields:
+        f.setdefault("hint", "")
+        if "group" in f:
+            f.pop("side_by_side", None)
+            prev_was_side = False
+            continue
+        if f.pop("side_by_side", False):
+            if not prev_was_side:
+                group_seq += 1
+            f["group"] = f"组{group_seq}"
+            prev_was_side = True
+        else:
+            f["group"] = ""
+            prev_was_side = False
+
+    tpl.setdefault("infer_enabled", False)
+    infer = tpl.get("infer")
+    if not isinstance(infer, dict):
+        infer = {}
+        tpl["infer"] = infer
+    for k, v in default_infer_config().items():
+        infer.setdefault(k, v)
     return tpl
 
 
@@ -399,7 +686,7 @@ def load_template_file(path: Path) -> Dict[str, Any]:
     err = validate_template(tpl)
     if err:
         raise ValueError(err)
-    return ensure_label_field(tpl)
+    return normalize_template(tpl)
 
 
 def load_or_create_template(dataset: Dataset) -> tuple[Dict[str, Any], Path]:
@@ -410,7 +697,7 @@ def load_or_create_template(dataset: Dataset) -> tuple[Dict[str, Any], Path]:
         except ValueError as e:
             print(f"[warn] 模版文件不合法（{e}），已重新生成: {path}")
     tpl = generate_template(dataset)
-    tpl = ensure_label_field(tpl)
+    tpl = normalize_template(tpl)
     save_template(tpl, path)
     return tpl, path
 
@@ -448,9 +735,9 @@ def make_app() -> Flask:
         tf, sf, gf = lst.get("title_field"), lst.get("subtitle_field"), lst.get("tag_field")
         return {
             "index": idx,
-            "title": stringify(row.get(tf)) if tf else f"#{idx + 1}",
-            "subtitle": stringify(row.get(sf)) if sf else "",
-            "tag": stringify(row.get(gf), 40) if gf else "",
+            "title": stringify(get_path(row, tf)) if tf else f"#{idx + 1}",
+            "subtitle": stringify(get_path(row, sf)) if sf else "",
+            "tag": stringify(get_path(row, gf), 40) if gf else "",
             "dirty": idx in dataset.dirty_rows,
         }
 
@@ -478,8 +765,7 @@ def make_app() -> Flask:
         filled = 0
         for row in dataset.rows:
             for k in keys:
-                if k not in row:
-                    row[k] = None
+                if not has_path(row, k) and set_path(row, k, None):
                     filled += 1
         return filled
 
@@ -571,7 +857,7 @@ def make_app() -> Flask:
         err = validate_template(body)
         if err:
             return jsonify({"error": err}), 400
-        template = ensure_label_field(body)
+        template = normalize_template(body)
         filled = sync_template_keys_to_rows(template)
         path = save_template(template, current_template_path)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
@@ -618,7 +904,7 @@ def make_app() -> Flask:
         err = validate_template(tpl)
         if err:
             return jsonify({"error": err}), 400
-        template = ensure_label_field(tpl)
+        template = normalize_template(tpl)
         filled = sync_template_keys_to_rows(template)
         current_template_path = save_template(template, path)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
@@ -634,7 +920,7 @@ def make_app() -> Flask:
     def regenerate_template():
         nonlocal template
         template = generate_template(dataset)
-        template = ensure_label_field(template)
+        template = normalize_template(template)
         filled = sync_template_keys_to_rows(template)
         path = save_template(template, current_template_path)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
@@ -698,14 +984,14 @@ def make_app() -> Flask:
                 return False
             row = dataset.rows[idx]
             for key, expected in filters.items():
-                if not matches_filter(row.get(key), expected, filter_specs[key]):
+                if not matches_filter(get_path(row, key), expected, filter_specs[key]):
                     return False
             if q:
                 keys = search_fields if search_fields else list(row.keys())
                 blob = "\n".join(
                     v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
                     for k in keys
-                    for v in [row.get(k)]
+                    for v in [get_path(row, k)]
                     if v is not None
                 ).lower()
                 if q not in blob:
@@ -751,12 +1037,11 @@ def make_app() -> Flask:
 
         changed = False
         for k, v in sets.items():
-            if row.get(k, object()) != v:
-                row[k] = v
-                changed = True
+            if not has_path(row, k) or get_path(row, k) != v:
+                if set_path(row, k, v):
+                    changed = True
         for k in deletes:
-            if isinstance(k, str) and k in row:
-                del row[k]
+            if isinstance(k, str) and delete_path(row, k):
                 changed = True
 
         saved_path = None
@@ -793,8 +1078,7 @@ def make_app() -> Flask:
 
         filled = 0
         for row in dataset.rows:
-            if key not in row:
-                row[key] = None
+            if not has_path(row, key) and set_path(row, key, None):
                 filled += 1
 
         saved_path = None
@@ -822,9 +1106,71 @@ def make_app() -> Flask:
             result["snapshot_path"] = str(snap)
         return jsonify(result)
 
+    # ---------------- 模型推理 ----------------
+
+    @app.get("/api/infer/config")
+    def infer_config():
+        return jsonify({
+            "modes": {
+                name: {
+                    "label": cfg["label"],
+                    "model": cfg["model"],
+                    "base_url": cfg["base_url"],
+                    "temperature": cfg["temperature"],
+                    "api_key_env": cfg["api_key_env"],
+                    "api_key_set": bool(
+                        cfg["api_key_env"] and os.environ.get(cfg["api_key_env"])
+                    ),
+                }
+                for name, cfg in INFER_MODES.items()
+            },
+        })
+
+    @app.post("/api/infer")
+    def run_infer():
+        body = request.get_json(silent=True) or {}
+        mode = body.get("mode")
+        if mode not in INFER_MODES:
+            return jsonify({"error": f"mode 必须是 {sorted(INFER_MODES)} 之一"}), 400
+        defaults = INFER_MODES[mode]
+
+        model = body.get("model") or defaults["model"]
+        base_url = body.get("base_url") or defaults["base_url"]
+        if not isinstance(model, str) or not isinstance(base_url, str):
+            return jsonify({"error": "model / base_url 必须是字符串"}), 400
+        try:
+            temperature = float(body.get("temperature", defaults["temperature"]))
+        except (TypeError, ValueError):
+            return jsonify({"error": "temperature 必须是数字"}), 400
+
+        system_prompt = body.get("system_prompt") or ""
+        user_prompt = body.get("user_prompt") or ""
+        if not isinstance(system_prompt, str) or not isinstance(user_prompt, str):
+            return jsonify({"error": "system_prompt / user_prompt 必须是字符串"}), 400
+        if not user_prompt.strip():
+            return jsonify({"error": "用户提示词不能为空"}), 400
+
+        started = _now_ms()
+        try:
+            response = infer_chat(
+                mode, model.strip(), base_url.strip(), temperature,
+                system_prompt, user_prompt,
+            )
+        except Exception as e:
+            return jsonify({"error": f"推理失败：{e}"}), 502
+        return jsonify({
+            "ok": True,
+            "mode": mode,
+            "model": model.strip(),
+            "base_url": base_url.strip(),
+            "response": response,
+            "elapsed_ms": _now_ms() - started,
+        })
+
     return app
 
 
 if __name__ == "__main__":
+    _load_dotenv(APP_DIR / ".env")
     app = make_app()
     app.run(host="127.0.0.1", port=5177, debug=True)

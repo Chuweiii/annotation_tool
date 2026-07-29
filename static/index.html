@@ -68,7 +68,11 @@
           <!-- 标注视图 -->
           <section class="detailPane" id="annotateView">
             <div class="detailHeader">
-              <div class="h2" id="detailTitle">标注工作区</div>
+              <div class="detailTitleWrap">
+                <div class="h2" id="detailTitle">标注工作区</div>
+                <button id="labelledTag" type="button" class="labelTag hidden"
+                        title="点击切换已标注 / 未标注"></button>
+              </div>
               <div class="detailActions">
                 <button id="addFieldBtn" type="button" title="给当前记录新增一个 key">+ 新增字段</button>
                 <button id="applyBtn" class="primary">保存此条</button>
@@ -79,6 +83,29 @@
               <div id="detail" class="detail hidden">
                 <div id="fieldsContainer"></div>
                 <div id="applyMsg" class="msg"></div>
+              </div>
+
+              <!-- 模型验证（标注的后续过程；是否显示及模型/提示词配置均在模版设置中） -->
+              <div id="inferSection" class="inferSection hidden">
+                <div class="h3">模型验证</div>
+                <div class="inferPanel">
+                  <div class="inferHint msg" id="inferInfoLine"></div>
+                  <div class="inferActions">
+                    <button id="runInferBtn" class="primary" type="button">运行模型验证</button>
+                    <span id="inferStatus" class="msg"></span>
+                  </div>
+                  <div class="inferResultWrap">
+                    <span class="promptLabel">模型回复</span>
+                    <textarea id="inferResult" rows="8" readonly placeholder="验证结果将显示在这里"></textarea>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 上一条 / 下一条快捷切换（点击时自动保存当前条目） -->
+              <div id="rowNav" class="rowNav hidden">
+                <button id="prevRowBtn" type="button">← 上一条</button>
+                <span id="rowNavPos" class="rowNavPos"></span>
+                <button id="nextRowBtn" type="button">下一条 →</button>
               </div>
             </div>
           </section>
@@ -128,8 +155,69 @@
                       <option value="auto">自动（每次修改立即写入工作文件）</option>
                     </select>
                   </div>
+                  <div class="control">
+                    <label for="tplInferEnabled">模型推理</label>
+                    <select id="tplInferEnabled">
+                      <option value="false">关闭（仅标注）</option>
+                      <option value="true">启用（标注后加入模型验证环节）</option>
+                    </select>
+                  </div>
                 </div>
                 <div class="tplHint" id="tplPathHint"></div>
+              </div>
+
+              <!-- 模型推理配置：启用模型推理后必须在此配置模型与提示词 -->
+              <div class="tplSection hidden" id="tplInferSection">
+                <div class="tplSectionTitle">模型推理配置（标注 → 模型验证）</div>
+                <div class="tplGlobal">
+                  <div class="control">
+                    <label for="tplInferMode">推理方式</label>
+                    <select id="tplInferMode">
+                      <option value="api">调用 API</option>
+                      <option value="local">本地模型</option>
+                    </select>
+                  </div>
+                  <div class="control">
+                    <label for="tplInferModel">模型名</label>
+                    <input id="tplInferModel" type="text" placeholder="如 gpt-4o / Qwen2.5-7B-Instruct" />
+                  </div>
+                  <div class="control">
+                    <label for="tplInferBaseUrl">Base URL</label>
+                    <input id="tplInferBaseUrl" type="text" placeholder="OpenAI 兼容接口地址" />
+                  </div>
+                  <div class="control">
+                    <label for="tplInferTemperature">温度</label>
+                    <input id="tplInferTemperature" type="number" step="0.1" min="0" value="0" />
+                  </div>
+                </div>
+                <div class="tplHint" id="tplInferKeyHint"></div>
+
+                <div class="inferPrompt">
+                  <div class="inferPromptHead">
+                    <span class="promptLabel">系统提示词</span>
+                    <select id="tplSysPromptSource" title="选择系统提示词来源">
+                      <option value="input">手动输入</option>
+                      <option value="file">从文件读取</option>
+                    </select>
+                    <input id="tplSysPromptFile" type="file" accept=".txt,.md,.json,.jsonl" class="hidden" />
+                    <span id="tplSysPromptFileName" class="inferFileName"></span>
+                  </div>
+                  <textarea id="tplSysPromptText" rows="3" placeholder="系统提示词（可留空）"></textarea>
+                </div>
+
+                <div class="inferPrompt">
+                  <div class="inferPromptHead">
+                    <span class="promptLabel">用户提示词</span>
+                    <select id="tplUserPromptSource" title="选择用户提示词来源">
+                      <option value="input">手动输入</option>
+                      <option value="file">从文件读取</option>
+                    </select>
+                    <input id="tplUserPromptFile" type="file" accept=".txt,.md,.json,.jsonl" class="hidden" />
+                    <span id="tplUserPromptFileName" class="inferFileName"></span>
+                  </div>
+                  <textarea id="tplUserPromptText" rows="5"
+                    placeholder="用户提示词（运行验证时必填）。可用 {字段key} 占位符引用当前条目的字段值，如 {input}、{meta.charge}"></textarea>
+                </div>
               </div>
 
               <div class="tplSection">
@@ -138,12 +226,13 @@
                   <div></div>
                   <div>key</div>
                   <div>显示名</div>
+                  <div title="以灰色小字显示在字段名旁的输入提示">输入提示</div>
                   <div>控件</div>
                   <div>高度(行)</div>
                   <div>选项（select 用，每行一个）</div>
                   <div>可改</div>
                   <div>隐藏</div>
-                  <div title="相邻的勾选字段将在工作区中两列排列">左右</div>
+                  <div title="填入组名；相邻且组名相同的字段将在工作区中并列一行（可两个以上）">并列组</div>
                   <div title="在左侧 case 列表中提供该字段的筛选控件">筛选</div>
                   <div></div>
                 </div>
