@@ -1,28 +1,35 @@
-# 通用标注平台（本地网页）
+# 通用标注平台
 
 一个模版驱动的通用标注工具：加载 `.jsonl` / `.json` / `.xlsx` / `.xls`，自动解析字段并推断控件；左侧是 case 列表，右侧是标注工作区。  
-当前版本支持：模版复用、会话续标（历史存档选择）、自动/手动存盘、可选模型验证流程。
+当前版本支持：浏览器上传、模版复用、临时会话续标、自动/手动保存、结果下载和可选模型验证流程。各浏览器会话使用独立的临时工作区；服务重启后临时数据可能消失，因此请及时下载结果。
 
-## 运行
+## 本地运行
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate        # Windows: .\.venv\Scripts\activate
 pip install -r requirements.txt
 
-# 三种指定数据文件方式（任选其一）
-python server.py path/to/data.jsonl
-ANNOTATION_DATA_PATH=path/to/data.xlsx python server.py
-python server.py                  # 自动选择项目目录下最近修改的数据文件
+python server.py
 ```
 
 浏览器打开：`http://127.0.0.1:5177/`
 
-不显式指定文件时，后端会在项目根目录自动选择最新的 `.jsonl/.json/.xlsx/.xls`。  
-页面初始化时，如果 `output/` 下存在该原始文件的历史存档，会弹窗让你选择：
+在页面选择本机的 `.jsonl`、`.json`、`.xlsx` 或 `.xls` 文件并上传。页面初始化时，如果当前临时会话有历史存档，会让你选择重新开始或继续标注。
 
 - `0` 重新开始（从原始文件载入）
 - `1..N` 继续某次历史标注存档
+
+## Render 部署
+
+1. 将仓库 push 到 GitHub。
+2. 在 Render 选择 **New > Blueprint** 并连接仓库；根目录的 `render.yaml` 会创建 Web Service。也可手动创建 Web Service。
+3. Build Command：`pip install -r requirements.txt`
+4. Start Command：`gunicorn server:app --workers 1 --threads 4 --timeout 120`
+5. 设置 `SECRET_KEY` 为随机长字符串（Blueprint 会自动生成）。仅在启用远程模型验证时另设 `OPENAI_API_KEY`。
+6. 部署成功后访问 Render 提供的公网 URL。标注者只需要浏览器，无需安装本项目。
+
+Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话索引保存在进程内，而实际上传和结果文件位于 Render 的临时目录；线程可处理并发请求。应用不依赖持久化磁盘，实例重启会清空状态。
 
 ## 输入格式与字段解析
 
@@ -102,11 +109,12 @@ OPENAI_API_KEY=your_key_here
 
 ## 输出与续标
 
-所有写盘都输出到 `output/`，文件名形如：
+所有中间文件都输出到当前浏览器会话在系统临时目录中的工作区，文件名形如：
 
 `<原始文件名去后缀>_YYYYMMDD_HHMMSS_ffffff<原后缀>`
 
 - 不覆盖原始数据文件
 - 手动模式：点击“保存到文件”时写盘
 - 自动模式：字段修改后自动写盘
-- 下次启动会根据同源文件列出历史存档，可按需继续标注
+- 点击“下载结果”将结果下载回用户电脑
+- 临时工作区不是持久存储，服务重启后不会保留

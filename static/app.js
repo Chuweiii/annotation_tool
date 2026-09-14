@@ -1282,6 +1282,21 @@ async function regenerateTemplate() {
 // ---------------------------------------------------------------------------
 
 function wire() {
+  $("uploadBtn").addEventListener("click", async () => {
+    const file = $("datasetFile").files?.[0];
+    if (!file) return toast("请先选择数据文件", "err");
+    const form = new FormData();
+    form.append("file", file);
+    $("uploadBtn").disabled = true;
+    try {
+      const response = await fetch("/api/upload", { method: "POST", body: form });
+      if (!response.ok) throw new Error(await response.text());
+      window.location.reload();
+    } catch (e) {
+      toast("上传失败：" + (e?.message ?? String(e)), "err", 5000);
+      $("uploadBtn").disabled = false;
+    }
+  });
   $("sidebarToggle").addEventListener("click", () =>
     setSidebarCollapsed(!isSidebarCollapsed()));
 
@@ -1341,8 +1356,19 @@ function wire() {
   $("saveBtn").addEventListener("click", async () => {
     $("saveBtn").disabled = true;
     try {
-      const r = await apiJson("POST", "/api/save", {});
-      toast("已写入：" + r.saved_path, "ok", 3500);
+      const response = await fetch("/api/save", { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?[\"']?([^\"';]+)/i);
+      const filename = match ? decodeURIComponent(match[1]) : "annotations.json";
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      toast("结果文件已下载", "ok", 3500);
       await refreshMeta();
     } catch (e) {
       toast("写入失败：" + (e?.message ?? String(e)), "err", 4000);
@@ -1403,6 +1429,12 @@ async function main() {
   } catch {}
   setSidebarCollapsed(collapsed);
 
+  const status = await apiGet("/api/status");
+  if (!status.ready) {
+    $("metaLine").textContent = "请选择本地 JSON / JSONL / Excel 文件并点击“上传数据”";
+    toast("请先上传待标注文件", "ok", 4000);
+    return;
+  }
   await chooseSession();
   state.template = await apiGet("/api/template");
   await refreshTemplateLibrary();

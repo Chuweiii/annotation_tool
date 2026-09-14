@@ -14,6 +14,8 @@
           <div class="sub" id="metaLine">加载中…</div>
         </div>
         <div class="actions">
+          <input id="datasetFile" type="file" accept=".json,.jsonl,.xlsx,.xls" />
+          <button id="uploadBtn" type="button">上传数据</button>
           <div class="saveModeCtl">
             <span class="fieldLbl">存盘模式</span>
             <select id="saveModeSel" title="auto：每次修改自动写入工作文件；manual：手动点击保存">
@@ -22,7 +24,7 @@
             </select>
           </div>
           <button id="templateBtn" type="button">模版设置</button>
-          <button id="saveBtn" class="primary">保存到文件</button>
+          <button id="saveBtn" class="primary">下载结果</button>
         </div>
       </header>
 

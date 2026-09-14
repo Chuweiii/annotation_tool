@@ -5,17 +5,24 @@ import os
 import re
 import shutil
 import sys
+import tempfile
+import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, g, jsonify, request, send_file, send_from_directory, session
+from werkzeug.local import LocalProxy
+from werkzeug.utils import secure_filename
 
 
 APP_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = APP_DIR / "output"
 TEMPLATE_DIR = APP_DIR / "annotation_templates"
+ALLOWED_SUFFIXES = {".json", ".jsonl", ".xlsx", ".xls"}
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 
 # 字段类型推断阈值
 ENUM_MAX_DISTINCT = 12       # 不同取值数 <= 该值 且为短字符串 -> select
@@ -43,7 +50,7 @@ INFER_MODES: Dict[str, Dict[str, Any]] = {
     "local": {
         "label": "本地模型",
         "model": "Qwen2.5-7B-Instruct",
-        "base_url": "http://127.0.0.1:8000/v1",
+        "base_url": os.environ.get("LOCAL_MODEL_BASE_URL", ""),
         "api_key_env": "",
         "temperature": 0.0,
     },
@@ -349,19 +356,20 @@ def timestamped_working_path(dataset: Dataset) -> Path:
     now_ns = time.time_ns()
     base = time.strftime("%Y%m%d_%H%M%S", time.localtime(now_ns / 1_000_000_000))
     micros = (now_ns // 1000) % 1_000_000
-    return OUTPUT_DIR / f"{source_stem(dataset)}_{base}_{micros:06d}{dataset.path.suffix}"
+    return dataset.path.parent / "output" / f"{source_stem(dataset)}_{base}_{micros:06d}{dataset.path.suffix}"
 
 
 def output_versions_for(source_path: Path) -> List[Path]:
     """查找指定原始文件对应的所有时间戳存档，最新的排在前面。"""
-    if not OUTPUT_DIR.exists():
+    output_dir = source_path.parent / "output"
+    if not output_dir.exists():
         return []
     pattern = re.compile(
         rf"^{re.escape(source_path.stem)}_(\d{{8}}_\d{{6}}(?:_\d{{3}}|_\d{{6}})?)"
         rf"{re.escape(source_path.suffix)}$"
     )
     versions = [
-        p for p in OUTPUT_DIR.iterdir()
+        p for p in output_dir.iterdir()
         if p.is_file() and pattern.fullmatch(p.name)
     ]
     versions.sort(key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
@@ -513,7 +521,7 @@ def generate_template(dataset: Dataset) -> Dict[str, Any]:
 
 
 def template_path_for(dataset: Dataset) -> Path:
-    return TEMPLATE_DIR / f"{source_stem(dataset)}.template.json"
+    return dataset.path.parent / f"{source_stem(dataset)}.template.json"
 
 
 def normalize_template_name(name: Any) -> Optional[str]:
@@ -716,8 +724,43 @@ def save_template(tpl: Dict[str, Any], path: Path) -> Path:
 
 def make_app() -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="/static")
-    dataset = load_data(pick_startup_data_path())
-    template, current_template_path = load_or_create_template(dataset)
+    app.secret_key = os.environ.get("SECRET_KEY", "dev-only-secret-change-in-production")
+    app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
+    workspaces: Dict[str, Dict[str, Any]] = {}
+    workspace_lock = threading.RLock()
+
+    @app.before_request
+    def lock_workspace_state():
+        state = workspaces.get(session.get("workspace_id"))
+        if state is not None:
+            g.workspace_lock = state["lock"]
+            g.workspace_lock.acquire()
+
+    @app.teardown_request
+    def unlock_workspace_state(_exc: Optional[BaseException]):
+        lock = getattr(g, "workspace_lock", None)
+        if lock is not None:
+            lock.release()
+
+    def workspace(required: bool = True) -> Optional[Dict[str, Any]]:
+        workspace_id = session.get("workspace_id")
+        state = workspaces.get(workspace_id) if workspace_id else None
+        if state is None and required:
+            raise RuntimeError("请先上传待标注文件")
+        return state
+
+    @app.errorhandler(RuntimeError)
+    def handle_runtime_error(exc: RuntimeError):
+        if str(exc) == "请先上传待标注文件":
+            return jsonify({"error": str(exc), "needs_upload": True}), 409
+        return jsonify({"error": str(exc)}), 500
+
+    dataset: Dataset = LocalProxy(lambda: workspace()["dataset"])  # type: ignore[assignment,index]
+    template: Dict[str, Any] = LocalProxy(lambda: workspace()["template"])  # type: ignore[assignment,index]
+    current_template_path: Path = LocalProxy(lambda: workspace()["template_path"])  # type: ignore[assignment,index]
+
+    def set_workspace_value(key: str, value: Any) -> None:
+        workspace()[key] = value  # type: ignore[index]
 
     def stringify(v: Any, max_len: int = 120) -> str:
         if v is None:
@@ -769,13 +812,58 @@ def make_app() -> Flask:
                     filled += 1
         return filled
 
-    startup_filled = sync_template_keys_to_rows(template)
-    if startup_filled > 0:
-        print(f"[info] 启动时按模版补齐缺失 key: {startup_filled}")
-
     @app.get("/")
     def index():
         return send_from_directory(APP_DIR / "static", "index.html")
+
+    @app.get("/health")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/api/status")
+    def status():
+        return jsonify({"ready": workspace(required=False) is not None})
+
+    @app.post("/api/upload")
+    def upload():
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            return jsonify({"error": "请选择待标注文件"}), 400
+        original = Path(uploaded.filename)
+        suffix = original.suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            return jsonify({"error": "仅支持 .json、.jsonl、.xlsx、.xls 文件"}), 400
+        filename = f"{secure_filename(original.stem) or 'upload'}{suffix}"
+
+        workspace_id = uuid.uuid4().hex
+        root = Path(tempfile.gettempdir()) / "annotation-tool" / workspace_id
+        root.mkdir(parents=True, exist_ok=False)
+        source_path = root / filename
+        uploaded.save(source_path)
+        try:
+            new_dataset = load_data(source_path)
+            new_template = normalize_template(generate_template(new_dataset))
+            new_template_path = root / f"{source_path.stem}.template.json"
+            save_template(new_template, new_template_path)
+            sync_state = {
+                "dataset": new_dataset,
+                "template": new_template,
+                "template_path": new_template_path,
+                "root": root,
+                "lock": threading.RLock(),
+            }
+        except Exception as exc:
+            shutil.rmtree(root, ignore_errors=True)
+            return jsonify({"error": f"文件解析失败：{exc}"}), 400
+
+        old_id = session.get("workspace_id")
+        with workspace_lock:
+            old_state = workspaces.pop(old_id, None) if old_id else None
+            workspaces[workspace_id] = sync_state
+        if old_state:
+            shutil.rmtree(old_state["root"], ignore_errors=True)
+        session["workspace_id"] = workspace_id
+        return jsonify({"ok": True, "filename": filename, "rows": len(new_dataset.rows)})
 
     @app.get("/api/meta")
     def meta():
@@ -808,12 +896,11 @@ def make_app() -> Flask:
 
     @app.post("/api/session/select")
     def select_session():
-        nonlocal dataset, template, current_template_path
         body = request.get_json(silent=True) or {}
         action = body.get("action")
         source_path = dataset.path
         if action == "restart":
-            dataset = load_data(source_path)
+            new_dataset = load_data(source_path)
         elif action == "resume":
             name = body.get("name")
             selected = next(
@@ -822,10 +909,13 @@ def make_app() -> Flask:
             )
             if selected is None:
                 return jsonify({"error": "所选存档不存在或不属于当前原始文件"}), 404
-            dataset = load_data(selected, source_path=source_path)
+            new_dataset = load_data(selected, source_path=source_path)
         else:
             return jsonify({"error": "action 必须是 restart 或 resume"}), 400
-        template, current_template_path = load_or_create_template(dataset)
+        new_template, new_template_path = load_or_create_template(new_dataset)
+        set_workspace_value("dataset", new_dataset)
+        set_workspace_value("template", new_template)
+        set_workspace_value("template_path", new_template_path)
         return jsonify({
             "ok": True,
             "data_path": str(dataset.path),
@@ -836,7 +926,7 @@ def make_app() -> Flask:
 
     @app.get("/api/template")
     def get_template():
-        return jsonify(template)
+        return jsonify(dict(template))
 
     @app.get("/api/templates")
     def list_templates():
@@ -852,14 +942,14 @@ def make_app() -> Flask:
 
     @app.put("/api/template")
     def put_template():
-        nonlocal template
         body = request.get_json(silent=True)
         err = validate_template(body)
         if err:
             return jsonify({"error": err}), 400
-        template = normalize_template(body)
-        filled = sync_template_keys_to_rows(template)
-        path = save_template(template, current_template_path)
+        new_template = normalize_template(body)
+        set_workspace_value("template", new_template)
+        filled = sync_template_keys_to_rows(new_template)
+        path = save_template(new_template, current_template_path)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
         return jsonify({
             "ok": True,
@@ -870,7 +960,6 @@ def make_app() -> Flask:
 
     @app.post("/api/template/select")
     def select_template():
-        nonlocal template, current_template_path
         body = request.get_json(silent=True) or {}
         path = template_path_from_name(body.get("name"))
         if path is None:
@@ -881,21 +970,22 @@ def make_app() -> Flask:
             selected = load_template_file(path)
         except (json.JSONDecodeError, ValueError) as e:
             return jsonify({"error": f"模版文件不合法: {e}"}), 400
-        template = selected
-        current_template_path = path
-        filled = sync_template_keys_to_rows(template)
+        local_path = workspace()["root"] / path.name
+        set_workspace_value("template", selected)
+        set_workspace_value("template_path", local_path)
+        save_template(selected, local_path)
+        filled = sync_template_keys_to_rows(selected)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
         return jsonify({
             "ok": True,
             "template_path": str(path),
-            "template": template,
+            "template": dict(template),
             "filled_count": filled,
             "auto_saved_path": saved_path,
         })
 
     @app.post("/api/template/save-as")
     def save_template_as():
-        nonlocal template, current_template_path
         body = request.get_json(silent=True) or {}
         path = template_path_from_name(body.get("name"))
         if path is None:
@@ -904,30 +994,32 @@ def make_app() -> Flask:
         err = validate_template(tpl)
         if err:
             return jsonify({"error": err}), 400
-        template = normalize_template(tpl)
-        filled = sync_template_keys_to_rows(template)
-        current_template_path = save_template(template, path)
+        new_template = normalize_template(tpl)
+        path = workspace()["root"] / path.name
+        set_workspace_value("template", new_template)
+        filled = sync_template_keys_to_rows(new_template)
+        new_path = save_template(new_template, path)
+        set_workspace_value("template_path", new_path)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
         return jsonify({
             "ok": True,
             "template_path": str(current_template_path),
-            "template": template,
+            "template": dict(template),
             "filled_count": filled,
             "auto_saved_path": saved_path,
         })
 
     @app.post("/api/template/generate")
     def regenerate_template():
-        nonlocal template
-        template = generate_template(dataset)
-        template = normalize_template(template)
-        filled = sync_template_keys_to_rows(template)
-        path = save_template(template, current_template_path)
+        new_template = normalize_template(generate_template(dataset))
+        set_workspace_value("template", new_template)
+        filled = sync_template_keys_to_rows(new_template)
+        path = save_template(new_template, current_template_path)
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
         return jsonify({
             "ok": True,
             "template_path": str(path),
-            "template": template,
+            "template": dict(template),
             "filled_count": filled,
             "auto_saved_path": saved_path,
         })
@@ -1096,15 +1188,12 @@ def make_app() -> Flask:
 
     @app.post("/api/save")
     def save():
-        body = request.get_json(silent=True) or {}
         out_path = persist()
-        result = {"ok": True, "saved_path": str(out_path)}
-        if body.get("snapshot"):
-            ts = time.strftime("%Y%m%d_%H%M%S")
-            snap = OUTPUT_DIR / f"{source_stem(dataset)}_snapshot_{ts}{dataset.path.suffix}"
-            shutil.copy2(out_path, snap)
-            result["snapshot_path"] = str(snap)
-        return jsonify(result)
+        return send_file(
+            out_path,
+            as_attachment=True,
+            download_name=out_path.name,
+        )
 
     # ---------------- 模型推理 ----------------
 
@@ -1170,7 +1259,8 @@ def make_app() -> Flask:
     return app
 
 
+_load_dotenv(APP_DIR / ".env")
+app = make_app()
+
 if __name__ == "__main__":
-    _load_dotenv(APP_DIR / ".env")
-    app = make_app()
     app.run(host="127.0.0.1", port=5177, debug=True)
