@@ -29,7 +29,14 @@ ENUM_MAX_DISTINCT = 12       # 不同取值数 <= 该值 且为短字符串 -> s
 ENUM_MAX_LEN = 40            # 枚举候选值的最大长度
 LONG_TEXT_MIN_LEN = 120      # 超过该长度（或含换行）的字符串 -> textarea
 
-WIDGETS = {"text", "textarea", "number", "checkbox", "select", "json"}
+WIDGETS = {
+    "text", "textarea", "number", "checkbox", "select", "json", "repeatable",
+    "collection_cards",
+}
+REPEATABLE_ITEM_WIDGETS = {
+    "text", "textarea", "number", "checkbox", "select", "multiselect",
+    "self_multiselect", "cascader", "checkbox_group",
+}
 LABELLED_FIELD = "is_labelled"
 
 # 嵌套字段使用 "." 连接路径，如 "meta.author.name"
@@ -545,6 +552,58 @@ def normalize_template_name(name: Any) -> Optional[str]:
     return f"{stem}.template.json"
 
 
+def numbered_tree_leaf_paths(path: Path) -> List[str]:
+    """把“缩进 + 数字序号”的文本目录展开成叶子完整路径。"""
+    if not path.exists():
+        return []
+    nodes: List[tuple[int, str]] = []
+    pattern = re.compile(r"^(\s*)\d+\.\s*(.+?)\s*$")
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(raw)
+        if not match:
+            continue
+        indent = len(match.group(1).expandtabs(2))
+        depth = max(0, indent // 2 - 1)
+        name = match.group(2).strip().rstrip("：:、，,")
+        nodes.append((depth, name))
+
+    result: List[str] = []
+    stack: List[str] = []
+    for index, (depth, name) in enumerate(nodes):
+        stack = stack[:depth]
+        stack.append(name)
+        next_depth = nodes[index + 1][0] if index + 1 < len(nodes) else -1
+        if next_depth <= depth:
+            result.append("；".join(stack))
+    return result
+
+
+def load_external_options(source: Dict[str, Any]) -> List[str]:
+    """从工作区内文件加载选项；支持逐行文本、JSON 数组和编号缩进树。"""
+    rel_path = source.get("path")
+    fmt = source.get("format", "lines")
+    if not isinstance(rel_path, str):
+        return []
+    candidate = (APP_DIR / rel_path).resolve()
+    try:
+        candidate.relative_to(APP_DIR.resolve())
+    except ValueError:
+        return []
+    if not candidate.exists() or not candidate.is_file():
+        return []
+    if fmt == "numbered_tree_leaves":
+        return numbered_tree_leaf_paths(candidate)
+    if fmt == "json_array":
+        try:
+            value = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        return [str(item) for item in value] if isinstance(value, list) else []
+    if fmt == "lines":
+        return [line.strip() for line in candidate.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return []
+
+
 def template_path_from_name(name: Any) -> Optional[Path]:
     filename = normalize_template_name(name)
     if filename is None:
@@ -561,6 +620,34 @@ def template_files() -> List[Path]:
     ]
     templates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return templates
+
+
+def matching_template_path(dataset: Dataset) -> Optional[Path]:
+    """按模版声明的 match.required_fields 自动匹配数据，不硬编码业务类型。"""
+    matches: List[tuple[float, int, Path]] = []
+    for path in template_files():
+        try:
+            tpl = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if validate_template(tpl):
+            continue
+        match = tpl.get("match")
+        if not isinstance(match, dict):
+            continue
+        required = match.get("required_fields", [])
+        if not isinstance(required, list) or not required or not all(isinstance(k, str) for k in required):
+            continue
+        if not dataset.rows or not all(all(has_path(row, key) for key in required) for row in dataset.rows):
+            continue
+        priority = match.get("priority", 0)
+        if not isinstance(priority, (int, float)):
+            priority = 0
+        matches.append((float(priority), len(required), path))
+    if not matches:
+        return None
+    matches.sort(key=lambda item: (item[0], item[1], item[2].stat().st_mtime), reverse=True)
+    return matches[0][2]
 
 
 def template_info(path: Path, current_path: Path, default_path: Path) -> Dict[str, Any]:
@@ -624,12 +711,92 @@ def validate_template(tpl: Any) -> Optional[str]:
             return f"fields[{i}].filterable 必须是布尔值"
         if not isinstance(f.get("options", []), list):
             return f"fields[{i}].options 必须是数组"
+        if f.get("widget") == "repeatable":
+            if not isinstance(f.get("track_order", True), bool):
+                return f"fields[{i}].track_order 必须是布尔值"
+            item_fields = f.get("item_fields")
+            if not isinstance(item_fields, list) or not item_fields:
+                return f"fields[{i}].item_fields 必须是非空数组"
+            item_keys: Set[str] = set()
+            for j, item in enumerate(item_fields):
+                if not isinstance(item, dict):
+                    return f"fields[{i}].item_fields[{j}] 必须是对象"
+                item_key = item.get("key")
+                if not isinstance(item_key, str) or not item_key:
+                    return f"fields[{i}].item_fields[{j}].key 必须是非空字符串"
+                if item_key in item_keys:
+                    return f"fields[{i}].item_fields key 重复: {item_key}"
+                item_keys.add(item_key)
+                if item.get("widget", "text") not in REPEATABLE_ITEM_WIDGETS:
+                    return f"fields[{i}].item_fields[{j}].widget 不受支持"
+                if not isinstance(item.get("options", []), list):
+                    return f"fields[{i}].item_fields[{j}].options 必须是数组"
+                if not isinstance(item.get("required", False), bool):
+                    return f"fields[{i}].item_fields[{j}].required 必须是布尔值"
+                if "options_from_path" in item and not isinstance(item["options_from_path"], str):
+                    return f"fields[{i}].item_fields[{j}].options_from_path 必须是字符串"
+                if item.get("options_from_object", "keys") not in {"keys", "entries"}:
+                    return f"fields[{i}].item_fields[{j}].options_from_object 必须是 keys 或 entries"
+                if "option_entry_separator" in item and (
+                    not isinstance(item["option_entry_separator"], str) or not item["option_entry_separator"]
+                ):
+                    return f"fields[{i}].item_fields[{j}].option_entry_separator 必须是非空字符串"
+                if "options_source" in item and not isinstance(item["options_source"], dict):
+                    return f"fields[{i}].item_fields[{j}].options_source 必须是对象"
+            steps = f.get("steps", [])
+            if not isinstance(steps, list):
+                return f"fields[{i}].steps 必须是数组"
+            for j, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    return f"fields[{i}].steps[{j}] 必须是对象"
+                step_fields = step.get("fields")
+                if not isinstance(step_fields, list) or not all(isinstance(k, str) for k in step_fields):
+                    return f"fields[{i}].steps[{j}].fields 必须是字符串数组"
+                unknown = set(step_fields) - item_keys
+                if unknown:
+                    return f"fields[{i}].steps[{j}] 包含未知子字段: {sorted(unknown)}"
+                if step.get("view", "cards") not in {"cards", "graph"}:
+                    return f"fields[{i}].steps[{j}].view 必须是 cards 或 graph"
+                for relation_key in ("relation_field", "group_by_relation"):
+                    relation_field = step.get(relation_key)
+                    if relation_field is not None:
+                        if not isinstance(relation_field, str) or relation_field not in item_keys:
+                            return f"fields[{i}].steps[{j}].{relation_key} 必须引用已有子字段"
+                        relation_spec = next(item for item in item_fields if item.get("key") == relation_field)
+                        if relation_spec.get("widget", "text") != "self_multiselect":
+                            return f"fields[{i}].steps[{j}].{relation_key} 必须引用 self_multiselect 子字段"
+                if step.get("view") == "graph":
+                    graph_relation = step.get("relation_field") or (step_fields[0] if step_fields else None)
+                    if graph_relation not in item_keys:
+                        return f"fields[{i}].steps[{j}] 的 graph 视图缺少有效关系字段"
+                    graph_spec = next(item for item in item_fields if item.get("key") == graph_relation)
+                    if graph_spec.get("widget", "text") != "self_multiselect":
+                        return f"fields[{i}].steps[{j}] 的 graph 关系字段必须是 self_multiselect"
+                for label_key in ("group_label", "single_label"):
+                    if label_key in step and not isinstance(step[label_key], str):
+                        return f"fields[{i}].steps[{j}].{label_key} 必须是字符串"
+        if f.get("widget") == "collection_cards":
+            card_fields = f.get("card_fields", [])
+            if not isinstance(card_fields, list):
+                return f"fields[{i}].card_fields 必须是数组"
+            for j, card_field in enumerate(card_fields):
+                if not isinstance(card_field, dict) or not isinstance(card_field.get("key"), str):
+                    return f"fields[{i}].card_fields[{j}] 必须包含字符串 key"
     lst = tpl.get("list")
     if lst is not None and not isinstance(lst, dict):
         return "list 必须是对象"
     sf = tpl.get("search_fields", [])
     if not isinstance(sf, list) or not all(isinstance(s, str) for s in sf):
         return "search_fields 必须是字符串数组"
+    match = tpl.get("match")
+    if match is not None:
+        if not isinstance(match, dict):
+            return "match 必须是对象"
+        required = match.get("required_fields", [])
+        if not isinstance(required, list) or not all(isinstance(k, str) for k in required):
+            return "match.required_fields 必须是字符串数组"
+        if not isinstance(match.get("priority", 0), (int, float)):
+            return "match.priority 必须是数字"
     infer = tpl.get("infer")
     if infer is not None:
         if not isinstance(infer, dict):
@@ -666,6 +833,12 @@ def normalize_template(tpl: Dict[str, Any]) -> Dict[str, Any]:
     prev_was_side = False
     for f in fields:
         f.setdefault("hint", "")
+        if f.get("widget") == "repeatable":
+            for item in f.get("item_fields", []):
+                source = item.get("options_source")
+                if not isinstance(source, dict):
+                    continue
+                item["options"] = load_external_options(source)
         if "group" in f:
             f.pop("side_by_side", None)
             prev_was_side = False
@@ -704,6 +877,11 @@ def load_or_create_template(dataset: Dataset) -> tuple[Dict[str, Any], Path]:
             return load_template_file(path), path
         except ValueError as e:
             print(f"[warn] 模版文件不合法（{e}），已重新生成: {path}")
+    matched = matching_template_path(dataset)
+    if matched is not None:
+        tpl = load_template_file(matched)
+        save_template(tpl, path)
+        return tpl, path
     tpl = generate_template(dataset)
     tpl = normalize_template(tpl)
     save_template(tpl, path)
@@ -812,6 +990,28 @@ def make_app() -> Flask:
                     filled += 1
         return filled
 
+    def available_template_files() -> List[Path]:
+        """当前会话可用模版：内置模版 + 本会话上传或保存的模版，同名时会话版本优先。"""
+        by_name = {path.name: path for path in template_files()}
+        state = workspace(required=False)
+        if state is not None:
+            for path in state["root"].glob("*.template.json"):
+                if path.is_file() and normalize_template_name(path.name) == path.name:
+                    by_name[path.name] = path
+        return sorted(by_name.values(), key=lambda path: path.stat().st_mtime, reverse=True)
+
+    def available_template_path(name: Any) -> Optional[Path]:
+        filename = normalize_template_name(name)
+        if filename is None:
+            return None
+        state = workspace(required=False)
+        if state is not None:
+            local = state["root"] / filename
+            if local.exists():
+                return local
+        builtin = TEMPLATE_DIR / filename
+        return builtin if builtin.exists() else None
+
     @app.get("/")
     def index():
         return send_from_directory(APP_DIR / "static", "index.html")
@@ -842,9 +1042,7 @@ def make_app() -> Flask:
         uploaded.save(source_path)
         try:
             new_dataset = load_data(source_path)
-            new_template = normalize_template(generate_template(new_dataset))
-            new_template_path = root / f"{source_path.stem}.template.json"
-            save_template(new_template, new_template_path)
+            new_template, new_template_path = load_or_create_template(new_dataset)
             sync_state = {
                 "dataset": new_dataset,
                 "template": new_template,
@@ -936,8 +1134,40 @@ def make_app() -> Flask:
             "default": default_path.name,
             "templates": [
                 template_info(p, current_template_path, default_path)
-                for p in template_files()
+                for p in available_template_files()
             ],
+        })
+
+    @app.post("/api/template/upload")
+    def upload_template():
+        uploaded = request.files.get("file")
+        if uploaded is None or not uploaded.filename:
+            return jsonify({"error": "请选择模版 JSON 文件"}), 400
+        filename = normalize_template_name(Path(uploaded.filename).name)
+        if filename is None:
+            return jsonify({"error": "模版文件名不合法；请使用 .json 或 .template.json"}), 400
+        try:
+            body = json.loads(uploaded.read().decode("utf-8-sig"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            return jsonify({"error": f"模版不是合法的 UTF-8 JSON：{e}"}), 400
+        err = validate_template(body)
+        if err:
+            return jsonify({"error": f"模版校验失败：{err}"}), 400
+
+        selected = normalize_template(body)
+        local_path = workspace()["root"] / filename
+        save_template(selected, local_path)
+        set_workspace_value("template", selected)
+        set_workspace_value("template_path", local_path)
+        filled = sync_template_keys_to_rows(selected)
+        saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
+        return jsonify({
+            "ok": True,
+            "name": filename,
+            "template_path": str(local_path),
+            "template": dict(template),
+            "filled_count": filled,
+            "auto_saved_path": saved_path,
         })
 
     @app.put("/api/template")
@@ -949,7 +1179,7 @@ def make_app() -> Flask:
         new_template = normalize_template(body)
         set_workspace_value("template", new_template)
         filled = sync_template_keys_to_rows(new_template)
-        path = save_template(new_template, current_template_path)
+        path = save_template(new_template, workspace()["template_path"])
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
         return jsonify({
             "ok": True,
@@ -961,10 +1191,8 @@ def make_app() -> Flask:
     @app.post("/api/template/select")
     def select_template():
         body = request.get_json(silent=True) or {}
-        path = template_path_from_name(body.get("name"))
+        path = available_template_path(body.get("name"))
         if path is None:
-            return jsonify({"error": "模版名不合法"}), 400
-        if not path.exists():
             return jsonify({"error": "模版不存在"}), 404
         try:
             selected = load_template_file(path)
@@ -984,37 +1212,12 @@ def make_app() -> Flask:
             "auto_saved_path": saved_path,
         })
 
-    @app.post("/api/template/save-as")
-    def save_template_as():
-        body = request.get_json(silent=True) or {}
-        path = template_path_from_name(body.get("name"))
-        if path is None:
-            return jsonify({"error": "模版名只能包含中英文、数字、下划线、点和短横线"}), 400
-        tpl = body.get("template", template)
-        err = validate_template(tpl)
-        if err:
-            return jsonify({"error": err}), 400
-        new_template = normalize_template(tpl)
-        path = workspace()["root"] / path.name
-        set_workspace_value("template", new_template)
-        filled = sync_template_keys_to_rows(new_template)
-        new_path = save_template(new_template, path)
-        set_workspace_value("template_path", new_path)
-        saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
-        return jsonify({
-            "ok": True,
-            "template_path": str(current_template_path),
-            "template": dict(template),
-            "filled_count": filled,
-            "auto_saved_path": saved_path,
-        })
-
     @app.post("/api/template/generate")
     def regenerate_template():
         new_template = normalize_template(generate_template(dataset))
         set_workspace_value("template", new_template)
         filled = sync_template_keys_to_rows(new_template)
-        path = save_template(new_template, current_template_path)
+        path = save_template(new_template, workspace()["template_path"])
         saved_path = str(persist()) if filled > 0 and template.get("save_mode") == "auto" else None
         return jsonify({
             "ok": True,
@@ -1156,32 +1359,6 @@ def make_app() -> Flask:
             "changed": changed,
             "auto_saved_path": saved_path,
             "item": row_summary(idx),
-        })
-
-    @app.post("/api/key/add")
-    def add_key_global():
-        body = request.get_json(silent=True) or {}
-        key = body.get("key")
-        if not isinstance(key, str) or not key.strip():
-            return jsonify({"error": "key must be a non-empty string"}), 400
-        key = key.strip()
-        if key == LABELLED_FIELD:
-            return jsonify({"error": f"字段已保留: {LABELLED_FIELD}"}), 400
-
-        filled = 0
-        for row in dataset.rows:
-            if not has_path(row, key) and set_path(row, key, None):
-                filled += 1
-
-        saved_path = None
-        if filled > 0 and template.get("save_mode") == "auto":
-            saved_path = str(persist())
-
-        return jsonify({
-            "ok": True,
-            "key": key,
-            "filled_count": filled,
-            "auto_saved_path": saved_path,
         })
 
     # ---------------- 存盘 ----------------

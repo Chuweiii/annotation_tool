@@ -48,6 +48,8 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
 | 短字符串 | `text` |
 | 对象/数组/混合类型 | `json` |
 
+平台支持通用的 `repeatable` 可重复子项控件：子项字段、编号、排序、动态选项和同组关系均由模版声明。模版还可通过 `match.required_fields` 声明适用的数据结构，实现按字段自动匹配，而无需在平台代码中硬编码任务类型。
+
 嵌套对象会展开为路径 key（如 `meta.author.name`）进行展示与编辑。
 
 ## 模版系统（`annotation_templates/*.template.json`）
@@ -58,7 +60,8 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
 在页面「模版设置」中可以：
 
 - 选择已有模版并套用（跨数据复用）
-- 另存为新模版
+- 从本机上传 `.json` / `.template.json` 模版；校验成功后立即套用并加入当前会话模版库
+- 在模版字段列表中新增、删除或配置字段，并保存当前模版
 - 重新解析字段（覆盖当前模版）
 - 拖拽调整字段顺序
 - 配置字段属性：`label`、`hint`、`widget`、`rows`、`editable`、`hidden`、`group`、`filterable`、`options`
@@ -68,6 +71,28 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
 
 > 说明：旧模版中的 `side_by_side` 会自动迁移为 `group` 并列组配置。
 
+### 可重复子项（`repeatable`）
+
+`repeatable` 用于一条记录中数量不固定、结构相同的子项，例如事件、实体、审核意见或其他子记录。模版通过 `item_fields` 定义子项表单，支持：
+
+- 模版设置中提供可视化配置器，可分别维护基础设置、子字段和流程步骤，无需直接编辑 JSON
+
+- `text`、`textarea`、`number`、`checkbox`、`select`、`multiselect`
+- `cascader`：把内嵌的完整路径逐级展示为多个下拉选择
+- `checkbox_group`：以复选框组展示静态或动态选项，选项较多时支持搜索过滤
+- `self_multiselect`：引用同一组的其他子项，可配置 `acyclic=true` 检查循环关系
+- `options`：模版内静态选项
+- `options_from_path`：从当前数据行的数组或对象动态生成选项；对象默认取 key，配置 `options_from_object: "entries"` 后会展示并保存“key + value”完整内容
+- `options_source`：从项目内逐行文本、JSON 数组或编号缩进树加载选项
+- 自动编号、必填提示、删除及引用清理；仅在 `track_order=true` 时记录和调整人工顺序
+- `steps`：按流程把同一批子项的字段分到多个步骤中集中标注
+- 步骤可配置 `view: "graph"` 和 `relation_field`，用可拖拽点边图维护依赖边；关闭顺序记录后，拖动仅调整图上位置
+- 步骤可配置 `group_by_relation`，按依赖关系的连通组及拓扑层级展示相关子项
+
+`collection_cards` 控件可把对象或数组的每个元素显示为独立、可折叠的小卡片，适合展示结构化来源材料；卡片标题和内部字段由模版配置。
+
+模版可配置 `match.required_fields` 和 `match.priority`。上传数据后，平台按字段结构选择最具体、优先级最高的匹配模版；匹配逻辑与具体业务无关。
+
 ## 标注流程
 
 - 左侧列表支持：
@@ -76,9 +101,9 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
   - 按模版中 `filterable=true` 的字段组合筛选
   - 分页与侧栏收起
 - 右侧工作区支持：
+  - 自动将 `editable=false` 的字段放入只读资料区，将可编辑字段放入标注区；两栏可独立滚动
   - 编辑当前记录字段值
   - 删除字段
-  - `+ 新增字段`（可把新 key 全局补齐为 `null`）
   - `保存此条`
   - `← 上一条 / 下一条 →` 快捷切换（切换时自动保存当前条）
 

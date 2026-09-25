@@ -76,15 +76,29 @@
                         title="点击切换已标注 / 未标注"></button>
               </div>
               <div class="detailActions">
-                <button id="addFieldBtn" type="button" title="给当前记录新增一个 key">+ 新增字段</button>
                 <button id="applyBtn" class="primary">保存此条</button>
               </div>
             </div>
             <div class="detailScroll">
               <div id="detailEmpty" class="empty">请在左侧选择一条记录</div>
               <div id="detail" class="detail hidden">
-                <div id="fieldsContainer"></div>
-                <div id="applyMsg" class="msg"></div>
+                <div id="workspaceSplit" class="workspaceSplit">
+                  <section id="sourcePanel" class="workspaceColumn sourcePanel">
+                    <div class="workspaceColumnHead">
+                      <div class="workspaceColumnTitle">资料区</div>
+                      <div class="workspaceColumnHint">只读材料</div>
+                    </div>
+                    <div id="sourceFieldsContainer" class="workspaceColumnBody"></div>
+                  </section>
+                  <section id="annotationPanel" class="workspaceColumn annotationPanel">
+                    <div class="workspaceColumnHead">
+                      <div class="workspaceColumnTitle">标注区</div>
+                      <div class="workspaceColumnHint">填写并保存标注结果</div>
+                    </div>
+                    <div id="fieldsContainer" class="workspaceColumnBody"></div>
+                    <div id="applyMsg" class="msg"></div>
+                  </section>
+                </div>
               </div>
 
               <!-- 模型验证（标注的后续过程；是否显示及模型/提示词配置均在模版设置中） -->
@@ -130,7 +144,8 @@
                     <select id="tplPicker"></select>
                   </div>
                   <button id="tplUseBtn" type="button">套用选中模版</button>
-                  <button id="tplSaveAsBtn" type="button">另存为新模版</button>
+                  <input id="tplUploadFile" type="file" accept=".json,.template.json,application/json" class="hidden" />
+                  <button id="tplUploadBtn" type="button">上传模版</button>
                 </div>
                 <div class="tplHint" id="tplLibraryHint"></div>
               </div>
@@ -231,7 +246,7 @@
                   <div title="以灰色小字显示在字段名旁的输入提示">输入提示</div>
                   <div>控件</div>
                   <div>高度(行)</div>
-                  <div>选项（select 用，每行一个）</div>
+                  <div>选项 / 控件配置</div>
                   <div>可改</div>
                   <div>隐藏</div>
                   <div title="填入组名；相邻且组名相同的字段将在工作区中并列一行（可两个以上）">并列组</div>
@@ -246,6 +261,23 @@
         </main>
       </div>
     </div>
+
+    <dialog id="repeatableConfigDialog" class="repeatableConfigDialog">
+      <div class="repeatableConfigDialogInner">
+        <div class="repeatableConfigDialogHead">
+          <div>
+            <div class="h2">可重复子项配置</div>
+            <div id="repeatableConfigSubtitle" class="tplHint"></div>
+          </div>
+          <button id="repeatableConfigClose" type="button" aria-label="关闭">关闭</button>
+        </div>
+        <div id="repeatableConfigBody" class="repeatableConfigBody"></div>
+        <div class="repeatableConfigDialogFoot">
+          <button id="repeatableConfigCancel" type="button">取消</button>
+          <button id="repeatableConfigApply" type="button" class="primary">应用配置</button>
+        </div>
+      </div>
+    </dialog>
 
     <div id="toast" class="toast hidden"></div>
     <script src="/static/app.js"></script>

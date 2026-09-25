@@ -258,21 +258,51 @@ input::placeholder,textarea::placeholder{color:rgba(71, 85, 105, 0.55)}
 .h2{font-size:18px;font-weight:700}
 .h3{font-size:15px;font-weight:700}
 .empty{padding:16px 4px;color:var(--muted)}
-.detail{padding:18px 2px 8px}
+.detail{padding:14px 2px 8px;flex:1 1 auto;min-height:0}
 .detailScroll{
   flex:1 1 auto;
   min-height:0;
-  overflow:auto;
+  overflow:hidden;
+  display:flex;
+  flex-direction:column;
 }
 .hidden{display:none}
 .msg{min-height:20px;color:var(--muted);font-size:12px;margin-top:8px;word-break:break-all}
 
 /* ---- 标注字段 ---- */
+.workspaceSplit{
+  height:100%;min-height:0;
+  display:grid;
+  grid-template-columns:minmax(320px,.9fr) minmax(520px,1.4fr);
+  gap:14px;
+}
+.workspaceSplit.singleColumn{grid-template-columns:minmax(0,1fr)}
+.workspaceColumn{
+  min-width:0;min-height:0;
+  display:flex;flex-direction:column;
+  border:1px solid var(--border-light);border-radius:12px;
+  background:#fff;overflow:hidden;
+}
+.workspaceColumn.hidden{display:none}
+.workspaceColumnHead{
+  flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:10px 13px;border-bottom:1px solid var(--border-light);
+  background:var(--panel2);
+}
+.workspaceColumnTitle{font-size:15px;font-weight:700}
+.workspaceColumnHint{font-size:11px;color:var(--muted)}
+.workspaceColumnBody{
+  flex:1 1 auto;min-height:0;overflow:auto;
+  display:flex;flex-direction:column;gap:18px;padding:14px;
+}
+.sourcePanel .workspaceColumnBody{background:rgba(240,242,246,.35)}
+#sourceFieldsContainer,
 #fieldsContainer{
   display:flex;
   flex-direction:column;
   gap:18px;
 }
+.annotationPanel > .msg{padding:0 14px 6px;margin-top:0}
 .field{
   min-width:0;
   display:flex;flex-direction:column;gap:7px;
@@ -305,6 +335,24 @@ input::placeholder,textarea::placeholder{color:rgba(71, 85, 105, 0.55)}
   color:#be123c;border-color:rgba(225, 29, 72, 0.3);
 }
 .fieldInput{width:100%}
+.sourceDetails{
+  border:1px solid var(--border-light);
+  border-radius:8px;
+  background:var(--panel2);
+}
+.sourceDetails summary{
+  cursor:pointer;
+  padding:9px 11px;
+  color:var(--muted);
+  font-size:12px;
+  user-select:none;
+}
+.sourceDetails .fieldInput{
+  display:block;
+  margin:0 10px 10px;
+  width:calc(100% - 20px);
+  background:#fff;
+}
 input.chk{
   width:18px;height:18px;padding:0;
   accent-color: var(--accent);
@@ -318,6 +366,150 @@ input.chk{
 .extraDivider::before,.extraDivider::after{
   content:"";flex:1;height:1px;background:var(--border-light);
 }
+
+/* ---- 通用可重复子项卡片 ---- */
+.repeatableEditor{display:flex;flex-direction:column;gap:12px}
+.repeatableStore{display:none}
+.repeatableSteps{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;
+  padding:6px;background:var(--panel2);border-radius:10px;
+}
+.repeatableStep{
+  background:transparent;border-color:transparent;color:var(--muted);font-weight:600;
+}
+.repeatableStep.active{
+  background:#fff;border-color:rgba(91,75,255,.35);color:#4338ca;
+  box-shadow:0 1px 5px rgba(15,23,42,.06);
+}
+.repeatableToolbar{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:12px 14px;border:1px solid var(--border-light);border-radius:10px;
+  background:var(--panel2);
+}
+.repeatableCount{font-size:13px;font-weight:600;color:var(--muted)}
+.repeatableWarnings{
+  padding:9px 12px;border:1px solid rgba(225,29,72,.28);border-radius:8px;
+  color:#be123c;background:rgba(225,29,72,.05);font-size:12px;
+}
+.repeatableCards{display:flex;flex-direction:column;gap:18px}
+.repeatableEmpty{
+  padding:28px 18px;text-align:center;color:var(--muted);
+  border:1px dashed var(--border);border-radius:10px;
+}
+.repeatableCard{
+  border:1px solid var(--border);border-radius:12px;background:#fff;
+  box-shadow:0 2px 10px rgba(15,23,42,.04);overflow:hidden;
+}
+.repeatableCardHead{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:11px 14px;background:rgba(91,75,255,.06);border-bottom:1px solid var(--border-light);
+}
+.repeatableCard.collapsed .repeatableCardHead{border-bottom:none}
+.repeatableCardTitle{font-size:15px;font-weight:700;color:#4338ca}
+.repeatableCardActions{display:flex;gap:6px}
+.repeatableCardActions button{padding:5px 9px;font-size:12px}
+.repeatableCardActions .repeatableCollapseBtn{color:#4338ca;border-color:rgba(91,75,255,.28)}
+.repeatableCardActions .dangerText{color:#be123c;border-color:rgba(225,29,72,.28)}
+.repeatableCardGrid{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 16px;
+  padding:16px;
+}
+.repeatableCardGrid[hidden]{display:none}
+.repeatableControl{display:flex;flex-direction:column;gap:6px;min-width:0}
+.repeatableControl.wide{grid-column:1 / -1}
+.repeatableControlLabel{font-size:13px;font-weight:600;color:var(--text)}
+.repeatableControlLabel small{margin-left:8px;color:var(--muted);font-weight:400}
+.repeatableControl select[multiple]{min-height:76px}
+.repeatableControl textarea,.repeatableControl select,.repeatableControl input{width:100%}
+.repeatableControl input[type="checkbox"]{
+  width:18px;height:18px;padding:0;margin:1px 0 0;
+  align-self:flex-start;accent-color:var(--accent);
+}
+.dependencyGraph{
+  border:1px solid var(--border);border-radius:12px;background:#fff;overflow:hidden;
+}
+.dependencyGraphGuide{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 13px;border-bottom:1px solid var(--border-light);
+  background:var(--panel2);font-size:12px;color:var(--muted);
+}
+.dependencyGraphGuide strong{color:#4338ca;white-space:nowrap}
+.dependencyGraphCanvas{
+  position:relative;min-height:400px;overflow:auto;
+  background-image:radial-gradient(rgba(91,75,255,.16) 1px,transparent 1px);
+  background-size:20px 20px;
+}
+.dependencyGraphEdges{
+  position:absolute;inset:0;width:100%;height:100%;overflow:visible;
+  pointer-events:none;
+}
+.dependencyGraphEdge{
+  fill:none;stroke:#7c6cff;stroke-width:2.2;pointer-events:none;
+}
+.dependencyGraphEdgeHit{
+  fill:none;stroke:transparent;stroke-width:14;pointer-events:stroke;cursor:pointer;
+}
+.dependencyGraphEdges marker path{fill:#7c6cff}
+.dependencyGraphNode{
+  position:absolute;width:184px;min-height:72px;padding:10px 12px;
+  display:flex;flex-direction:column;align-items:flex-start;gap:5px;
+  border:2px solid rgba(91,75,255,.34);border-radius:12px;
+  background:#fff;box-shadow:0 4px 14px rgba(15,23,42,.09);
+  cursor:grab;text-align:left;touch-action:none;user-select:none;z-index:2;
+}
+.dependencyGraphNode:active{cursor:grabbing}
+.dependencyGraphNode.selected{
+  border-color:var(--accent);background:rgba(91,75,255,.09);
+  box-shadow:0 0 0 3px rgba(91,75,255,.12);
+}
+.dependencyGraphNodeId{font-size:12px;font-weight:800;color:#4338ca}
+.dependencyGraphNodeTitle{
+  width:100%;font-size:12px;line-height:1.35;color:var(--text);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+.repeatableDependencyGroup{
+  border:1px solid rgba(91,75,255,.24);border-radius:14px;
+  background:rgba(91,75,255,.025);overflow:hidden;
+}
+.repeatableDependencyGroupHead{
+  padding:10px 14px;background:rgba(91,75,255,.09);color:#4338ca;
+  font-size:13px;font-weight:800;border-bottom:1px solid rgba(91,75,255,.15);
+}
+.repeatableDependencyLevels{display:flex;flex-direction:column;gap:0}
+.repeatableDependencyLevel{padding:12px 14px 14px;border-bottom:1px dashed var(--border)}
+.repeatableDependencyLevel:last-child{border-bottom:none}
+.repeatableDependencyLevelTitle{margin-bottom:9px;font-size:12px;font-weight:800;color:var(--muted)}
+.repeatableDependencyLevel.cyclic .repeatableDependencyLevelTitle{color:#be123c}
+.repeatableDependencyGroupCards{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:14px}
+.cascaderControl{display:flex;gap:8px;flex-wrap:wrap}
+.cascaderControl select{flex:1 1 210px;min-width:0}
+.checkboxGroup{
+  border:1px solid var(--border);border-radius:8px;background:#fff;padding:8px;
+}
+.checkboxGroupSearch{margin-bottom:8px}
+.checkboxGroupList{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:4px 12px;
+  max-height:240px;overflow:auto;padding:2px;
+}
+.checkboxOption{display:flex;align-items:flex-start;gap:7px;padding:5px 6px;border-radius:6px;font-size:12px}
+.checkboxOption:hover{background:var(--panel2)}
+.checkboxOption input{width:16px;flex:0 0 auto;margin-top:1px;accent-color:var(--accent)}
+.checkboxOptionText{display:flex;flex-direction:column;gap:4px;line-height:1.4;word-break:break-word}
+.checkboxOptionText > strong{font-size:12px;color:var(--text)}
+.checkboxOptionText > span{white-space:pre-wrap;color:var(--muted)}
+
+/* ---- 通用对象/数组卡片展示 ---- */
+.collectionCards{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}
+.collectionCard{border:1px solid var(--border);border-radius:10px;background:#fff;overflow:hidden}
+.collectionCard summary{
+  cursor:pointer;padding:11px 13px;font-weight:700;font-size:13px;
+  background:var(--panel2);word-break:break-word;
+}
+.collectionCardBody{display:flex;flex-direction:column;gap:10px;padding:12px}
+.collectionCardField{display:flex;flex-direction:column;gap:4px}
+.collectionCardFieldLabel{font-size:11px;font-weight:700;color:var(--muted)}
+.collectionCardFieldValue{font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.collectionCardsEmpty{padding:18px;color:var(--muted);font-size:12px;text-align:center}
 
 /* ---- 模型推理 ---- */
 .inferSection{
@@ -391,6 +583,58 @@ input.chk{
   color:#be123c;border-color:rgba(225, 29, 72, 0.3);
 }
 .tplAddBtn{margin-top:10px}
+.repeatableConfigBtn{width:100%;padding:7px 8px;font-size:12px;color:#4338ca;border-color:rgba(91,75,255,.3)}
+
+/* ---- repeatable 可视化配置器 ---- */
+.repeatableConfigDialog{
+  width:min(1180px,96vw);height:min(880px,94vh);padding:0;
+  border:1px solid var(--border);border-radius:14px;background:#fff;color:var(--text);
+  box-shadow:0 24px 70px rgba(15,23,42,.28);
+}
+.repeatableConfigDialog::backdrop{background:rgba(15,23,42,.46)}
+.repeatableConfigDialogInner{height:100%;display:flex;flex-direction:column;min-height:0}
+.repeatableConfigDialogHead,.repeatableConfigDialogFoot{
+  flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:14px 18px;border-bottom:1px solid var(--border-light);background:#fff;
+}
+.repeatableConfigDialogHead .tplHint{margin-top:4px}
+.repeatableConfigDialogFoot{justify-content:flex-end;border-top:1px solid var(--border-light);border-bottom:none}
+.repeatableConfigBody{flex:1 1 auto;min-height:0;overflow:auto;padding:18px;background:#f8fafc}
+.repeatableConfigSection{margin-bottom:18px;border:1px solid var(--border-light);border-radius:12px;background:#fff;overflow:hidden}
+.repeatableConfigSectionHead{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:11px 14px;background:var(--panel2);border-bottom:1px solid var(--border-light);
+}
+.repeatableConfigSectionTitle{font-size:14px;font-weight:800}
+.repeatableConfigGrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;padding:14px}
+.repeatableConfigControl{display:flex;flex-direction:column;gap:5px;min-width:0;font-size:12px;color:var(--muted)}
+.repeatableConfigControl.wide{grid-column:1 / -1}
+.repeatableConfigControl input,.repeatableConfigControl select,.repeatableConfigControl textarea{width:100%;color:var(--text)}
+.repeatableConfigChecks{display:flex;gap:18px;align-items:center;flex-wrap:wrap;padding:0 14px 14px}
+.repeatableConfigCheck{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--text)}
+.repeatableConfigCheck input{width:16px;height:16px;accent-color:var(--accent)}
+.repeatableConfigAdvanced{border-top:1px solid var(--border-light)}
+.repeatableConfigAdvanced summary{
+  cursor:pointer;padding:11px 14px;color:var(--muted);font-size:12px;font-weight:700;
+  background:rgba(240,242,246,.45);
+}
+.repeatableConfigAdvanced[open] summary{border-bottom:1px solid var(--border-light)}
+.repeatableConfigList{display:flex;flex-direction:column;gap:12px;padding:14px}
+.repeatableConfigCard{border:1px solid var(--border);border-radius:10px;background:#fff;overflow:hidden}
+.repeatableConfigCardHead{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:9px 12px;background:rgba(91,75,255,.055);border-bottom:1px solid var(--border-light);
+}
+.repeatableConfigCardTitle{font-size:13px;font-weight:800;color:#4338ca}
+.repeatableConfigCardActions{display:flex;gap:6px;flex-wrap:wrap}
+.repeatableConfigCardActions button{padding:4px 8px;font-size:11px}
+.repeatableConfigCardActions .dangerText{color:#be123c;border-color:rgba(225,29,72,.3)}
+.repeatableStepFields{grid-column:1 / -1;border-top:1px dashed var(--border);padding-top:10px}
+.repeatableStepFieldsTitle{font-size:12px;font-weight:700;margin-bottom:7px;color:var(--text)}
+.repeatableStepFieldRow{display:flex;align-items:center;gap:7px;padding:4px 0;font-size:12px}
+.repeatableStepFieldRow .fieldName{flex:1;min-width:0;word-break:break-all}
+.repeatableStepFieldRow button{padding:2px 7px;font-size:11px}
+.repeatableConfigEmpty{padding:18px;text-align:center;color:var(--muted);font-size:12px}
 
 .toast{
   position:fixed;left:50%;bottom:18px;transform:translateX(-50%);
@@ -412,8 +656,20 @@ input.chk{
   .list{max-height:42vh}
   .tplTableHead{display:none}
   .tplRow{grid-template-columns: 1fr 1fr}
+  .detailScroll{overflow:auto;display:block}
+  .detail{min-height:auto}
+  .workspaceSplit{height:auto;grid-template-columns:1fr}
+  .workspaceColumnBody{overflow:visible}
 }
 
 @media (max-width: 720px){
   .fieldGroup{grid-template-columns:1fr !important}
+  .repeatableCardGrid{grid-template-columns:1fr}
+  .repeatableControl.wide{grid-column:auto}
+  .repeatableCardHead{align-items:flex-start;flex-direction:column}
+  .collectionCards{grid-template-columns:1fr}
+  .dependencyGraphGuide{align-items:flex-start;flex-direction:column}
+  .repeatableDependencyGroupCards{grid-template-columns:1fr}
+  .repeatableConfigGrid{grid-template-columns:1fr}
+  .repeatableConfigControl.wide{grid-column:auto}
 }
