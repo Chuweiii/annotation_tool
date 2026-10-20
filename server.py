@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -35,7 +36,7 @@ WIDGETS = {
 }
 REPEATABLE_ITEM_WIDGETS = {
     "text", "textarea", "number", "checkbox", "select", "multiselect",
-    "self_multiselect", "cascader", "checkbox_group",
+    "self_multiselect", "cascader", "checkbox_group", "text_list",
 }
 LABELLED_FIELD = "is_labelled"
 
@@ -699,6 +700,8 @@ def validate_template(tpl: Any) -> Optional[str]:
             return f"fields[{i}].rows 必须是正整数"
         if not isinstance(f.get("editable", True), bool):
             return f"fields[{i}].editable 必须是布尔值"
+        if f.get("panel") not in (None, "source", "annotation"):
+            return f"fields[{i}].panel 必须是 source 或 annotation"
         if not isinstance(f.get("hidden", False), bool):
             return f"fields[{i}].hidden 必须是布尔值"
         if not isinstance(f.get("side_by_side", False), bool):
@@ -752,9 +755,44 @@ def validate_template(tpl: Any) -> Optional[str]:
                 step_fields = step.get("fields")
                 if not isinstance(step_fields, list) or not all(isinstance(k, str) for k in step_fields):
                     return f"fields[{i}].steps[{j}].fields 必须是字符串数组"
+                review_sources = step.get("review_source_fields", [])
+                if not isinstance(review_sources, list) or not all(isinstance(k, str) for k in review_sources):
+                    return f"fields[{i}].steps[{j}].review_source_fields 必须是字符串数组"
                 unknown = set(step_fields) - item_keys
                 if unknown:
                     return f"fields[{i}].steps[{j}] 包含未知子字段: {sorted(unknown)}"
+                sections = step.get("sections", [])
+                if not isinstance(sections, list):
+                    return f"fields[{i}].steps[{j}].sections 必须是数组"
+                section_keys = set()
+                for section in sections:
+                    if not isinstance(section, dict) or not isinstance(section.get("label"), str):
+                        return f"fields[{i}].steps[{j}].sections 必须包含字符串 label"
+                    keys = section.get("fields")
+                    if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
+                        return f"fields[{i}].steps[{j}].sections.fields 必须是字符串数组"
+                    if set(keys) - item_keys or section_keys.intersection(keys) or len(set(keys)) != len(keys):
+                        return f"fields[{i}].steps[{j}].sections 包含未知或重复子字段"
+                    section_keys.update(keys)
+                overrides = step.get("field_overrides", {})
+                if not isinstance(overrides, dict) or set(overrides) - item_keys:
+                    return f"fields[{i}].steps[{j}].field_overrides 必须引用已有子字段"
+                for override_key, override in overrides.items():
+                    if not isinstance(override, dict):
+                        return f"fields[{i}].steps[{j}].field_overrides 值必须是对象"
+                    for property_key in ("label", "hint"):
+                        if property_key in override and not isinstance(override[property_key], str):
+                            return f"fields[{i}].steps[{j}].field_overrides.{property_key} 必须是字符串"
+                    for property_key in ("editable", "wide"):
+                        if property_key in override and not isinstance(override[property_key], bool):
+                            return f"fields[{i}].steps[{j}].field_overrides.{property_key} 必须是布尔值"
+                    if "show_results" in override:
+                        relation_spec = next(item for item in item_fields if item.get("key") == override_key)
+                        if relation_spec.get("widget") != "self_multiselect":
+                            return f"fields[{i}].steps[{j}].show_results 必须用于 self_multiselect 字段"
+                    results = override.get("show_results", [])
+                    if not isinstance(results, list) or not all(isinstance(k, str) and k in item_keys for k in results):
+                        return f"fields[{i}].steps[{j}].show_results 必须引用已有子字段"
                 if step.get("view", "cards") not in {"cards", "graph"}:
                     return f"fields[{i}].steps[{j}].view 必须是 cards 或 graph"
                 for relation_key in ("relation_field", "group_by_relation"):
@@ -776,12 +814,35 @@ def validate_template(tpl: Any) -> Optional[str]:
                     if label_key in step and not isinstance(step[label_key], str):
                         return f"fields[{i}].steps[{j}].{label_key} 必须是字符串"
         if f.get("widget") == "collection_cards":
+            if not isinstance(f.get("allow_delete", False), bool):
+                return f"fields[{i}].allow_delete 必须是布尔值"
+            if f.get("editable", True) and not isinstance(f.get("backup_field"), str):
+                return f"fields[{i}] 可编辑卡片必须配置 backup_field"
             card_fields = f.get("card_fields", [])
             if not isinstance(card_fields, list):
                 return f"fields[{i}].card_fields 必须是数组"
             for j, card_field in enumerate(card_fields):
                 if not isinstance(card_field, dict) or not isinstance(card_field.get("key"), str):
                     return f"fields[{i}].card_fields[{j}] 必须包含字符串 key"
+                if not isinstance(card_field.get("editable", False), bool):
+                    return f"fields[{i}].card_fields[{j}].editable 必须是布尔值"
+    by_key = {f["key"]: f for f in fields}
+    backup_fields = set()
+    collection_keys = {f["key"] for f in fields if f.get("widget") == "collection_cards"}
+    for f in fields:
+        if f.get("widget") != "collection_cards" or not f.get("editable", True):
+            continue
+        backup_key = f["backup_field"]
+        backup = by_key.get(backup_key, {})
+        overlapping = any(
+            backup_key == key or backup_key.startswith(key + ".") or key.startswith(backup_key + ".")
+            for key in collection_keys | backup_fields
+        )
+        if (overlapping or
+                backup.get("widget") != "json" or backup.get("editable", True) or
+                not backup.get("hidden", False)):
+            return f"{f['key']}.backup_field 必须引用独立、隐藏且只读的 json 字段"
+        backup_fields.add(backup_key)
     lst = tpl.get("list")
     if lst is not None and not isinstance(lst, dict):
         return "list 必须是对象"
@@ -896,6 +957,34 @@ def save_template(tpl: Dict[str, Any], path: Path) -> Path:
     return path
 
 
+def validate_collection_revision(spec: Dict[str, Any], current: Any, original: Any, updated: Any) -> Optional[str]:
+    """可恢复地删除对象卡片，且只允许修订模版声明的文本子字段。"""
+    if not all(isinstance(value, dict) for value in (current, original, updated)):
+        return "可修订卡片必须是对象"
+    if not spec.get("allow_delete", False) and set(current) - set(updated):
+        return "不允许删除卡片"
+    editable = [f["key"] for f in spec.get("card_fields", []) if f.get("editable", False)]
+    for name, item in updated.items():
+        if name not in original:
+            return "不允许新增或重命名卡片"
+        base = current.get(name, original[name])
+        if not isinstance(item, dict) or not isinstance(base, dict):
+            return "卡片内容必须是对象"
+        expected = deepcopy(base)
+        for key in editable:
+            if not has_path(item, key):
+                continue
+            value = get_path(item, key)
+            if value == get_path(base, key):
+                continue
+            if not isinstance(value, str) or not value.strip():
+                return "修订内容不能为空；如不需要该卡片，请删除整份卡片"
+            set_path(expected, key, value)
+        if expected != item:
+            return "只能修改允许编辑的内容，不能修改其他属性"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Flask 应用
 # ---------------------------------------------------------------------------
@@ -976,10 +1065,12 @@ def make_app() -> Flask:
 
     def sync_template_keys_to_rows(tpl: Dict[str, Any]) -> int:
         """将模版字段全局补齐到所有行（缺失值填 None）。"""
+        backup_keys = {f.get("backup_field") for f in tpl.get("fields", []) if f.get("backup_field")}
         keys = [
             f.get("key")
             for f in tpl.get("fields", [])
             if isinstance(f, dict) and isinstance(f.get("key"), str) and f.get("key")
+            and f["key"] not in backup_keys
         ]
         if not keys:
             return 0
@@ -1317,6 +1408,8 @@ def make_app() -> Flask:
         deletes = body.get("delete") or []
         if not isinstance(sets, dict) or not isinstance(deletes, list):
             return jsonify({"error": "body must be {set: object, delete: array}"}), 400
+        if not all(isinstance(k, str) for k in list(sets) + deletes):
+            return jsonify({"error": "字段路径必须是字符串"}), 400
         if LABELLED_FIELD in [d for d in deletes if isinstance(d, str)]:
             return jsonify({"error": f"字段不可删除: {LABELLED_FIELD}"}), 400
         if not sets and not deletes:
@@ -1325,12 +1418,41 @@ def make_app() -> Flask:
         editable = {f["key"] for f in template.get("fields", []) if f.get("editable", True)}
         template_keys = {f["key"] for f in template.get("fields", [])}
         row = dataset.rows[idx]
+        collections = {
+            f["key"]: f for f in template.get("fields", [])
+            if f.get("widget") == "collection_cards" and f.get("editable", True) and f.get("backup_field")
+        }
+        backups = {f["backup_field"] for f in collections.values()}
+        for key in list(sets) + deletes:
+            for root in set(collections) | backups:
+                overlaps = key == root or key.startswith(root + ".") or root.startswith(key + ".")
+                if overlaps and (key != root or root in backups or key in deletes):
+                    return jsonify({"error": "请整体提交卡片集合；原始备份由系统维护，不能直接修改或删除"}), 400
         for k in list(sets.keys()) + [d for d in deletes if isinstance(d, str)]:
             # 模版中标记为不可改的字段拒绝写入；模版外的新 key 允许（即"增 key"）
             if k in template_keys and k not in editable:
                 return jsonify({"error": f"字段不可修改（模版中 editable=false）: {k}"}), 400
 
+        collection_backups = {}
+        for key, spec in collections.items():
+            if key not in sets:
+                continue
+            current = get_path(row, key)
+            original = get_path(row, spec["backup_field"])
+            if original is None:
+                original = current
+            error = validate_collection_revision(spec, current, original, sets[key])
+            if error:
+                return jsonify({"error": f"{key}: {error}"}), 400
+            if current != sets[key]:
+                if not set_path(deepcopy(row), spec["backup_field"], original):
+                    return jsonify({"error": f"{key}: 原始备份路径不可写入"}), 400
+                collection_backups[spec["backup_field"]] = deepcopy(original)
+
         changed = False
+        for key, value in collection_backups.items():
+            if get_path(row, key) is None:
+                set_path(row, key, value)
         for k, v in sets.items():
             if not has_path(row, k) or get_path(row, k) != v:
                 if set_path(row, k, v):
@@ -1359,6 +1481,7 @@ def make_app() -> Flask:
             "changed": changed,
             "auto_saved_path": saved_path,
             "item": row_summary(idx),
+            "collection_backups": collection_backups,
         })
 
     # ---------------- 存盘 ----------------

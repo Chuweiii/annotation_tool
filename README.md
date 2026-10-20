@@ -64,7 +64,11 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
 - 在模版字段列表中新增、删除或配置字段，并保存当前模版
 - 重新解析字段（覆盖当前模版）
 - 拖拽调整字段顺序
-- 配置字段属性：`label`、`hint`、`widget`、`rows`、`editable`、`hidden`、`group`、`filterable`、`options`
+- 配置字段属性：`label`、`hint`、`widget`、`rows`、`editable`、`panel`、`hidden`、`group`、`filterable`、`options`
+- 通过「显示区域」选择自动分区、资料区或标注区，位置与编辑权限独立；选择自动分区会移除 `panel` 配置，按是否可编辑自动放置
+- 在可重复字段的「配置子项与流程」中，为卡片步骤新增、命名、排序、删除分区，并选择各字段所在分区；分区内字段顺序沿用该步骤的子字段顺序
+- 在「本步骤字段展示与关联结果」中设置显示名、提示、只读状态和宽度；关系字段可勾选展示关联子项的指定结果字段
+- 子字段选择 `text_list` 控件后，可配置新增按钮文字，标注时按条添加或删除文本信息
 - 配置左侧列表展示字段（标题/副标题/标签）
 - 切换存盘模式（`manual` / `auto`）
 - 启用或关闭模型验证（`infer_enabled`）
@@ -91,6 +95,8 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
 
 `collection_cards` 控件可把对象或数组的每个元素显示为独立、可折叠的小卡片，适合展示结构化来源材料；卡片标题和内部字段由模版配置。
 
+对象形式的 `collection_cards` 还支持修订支线：设置 `editable=true`、`panel="source"`，字段仍放在资料区；在 `card_fields` 中用 `editable=true` 指定允许修改的文本子字段，`allow_delete=true` 允许删除整张卡片。必须用 `backup_field` 引用一个隐藏、只读的 `json` 字段。首次保存修订时，系统自动备份原始集合；导出的主字段保存有效卡片，备份用于查看原文、恢复原文和恢复已删除卡片。未修订的记录不产生备份。
+
 模版可配置 `match.required_fields` 和 `match.priority`。上传数据后，平台按字段结构选择最具体、优先级最高的匹配模版；匹配逻辑与具体业务无关。
 
 ## 标注流程
@@ -101,7 +107,7 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
   - 按模版中 `filterable=true` 的字段组合筛选
   - 分页与侧栏收起
 - 右侧工作区支持：
-  - 自动将 `editable=false` 的字段放入只读资料区，将可编辑字段放入标注区；两栏可独立滚动
+  - 默认将 `editable=false` 的字段放入资料区，将可编辑字段放入标注区；可通过 `panel="source"` / `"annotation"` 单独指定位置，两栏可独立滚动
   - 编辑当前记录字段值
   - 删除字段
   - `保存此条`

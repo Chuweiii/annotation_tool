@@ -27,6 +27,7 @@ const state = {
   autoSaveTimer: null,
   lastInputAt: 0,         // 最近一次输入时间（用于空闲判定）
   inferConfigs: null,     // /api/infer/config 返回的各模式默认配置
+  repeatableSteps: {},
 };
 
 const SIDEBAR_COLLAPSED_KEY = "annotation_sidebar_collapsed_v1";
@@ -381,7 +382,8 @@ function repeatableWarnings(items, spec, visibleKeys = null) {
       if (field.required && (value === "" || value === null || value === undefined || (Array.isArray(value) && !value.length))) {
         warnings.push(`${itemId} 缺少必填项“${field.label || field.key}”`);
       }
-      if (field.widget === "cascader" && value && !optionsForRepeatableField(field).includes(String(value))) {
+      const pathValue = Array.isArray(value) ? value.join(field.delimiter || "；") : String(value ?? "");
+      if (field.widget === "cascader" && pathValue && !optionsForRepeatableField(field).includes(pathValue)) {
         warnings.push(`${itemId} 的“${field.label || field.key}”尚未选择到末级`);
       }
       if (field.widget !== "self_multiselect") continue;
@@ -460,6 +462,23 @@ function normalizeRepeatableItem(value, index, spec) {
   if (spec.track_order === false) delete item[orderField];
   else item[orderField] = index + 1;
   for (const field of spec.item_fields || []) {
+    if (field.widget === "cascader" && field.value_type === "array") {
+      const value = item[field.key];
+      const parts = Array.isArray(value) ? value : value ? String(value).split(field.delimiter || "；") : [];
+      item[field.key] = parts.map((part) => field.value_aliases?.[part] ?? part);
+      continue;
+    }
+    if (field.widget === "select" && field.value_type === "boolean") {
+      const value = item[field.key];
+      item[field.key] = value === true || value === "true" ? true
+        : value === false || value === "false" ? false : null;
+      continue;
+    }
+    if (field.widget === "text_list") {
+      const value = item[field.key];
+      item[field.key] = Array.isArray(value) ? value.map(String) : value ? [String(value)] : [];
+      continue;
+    }
     if (item[field.key] !== undefined && item[field.key] !== null) continue;
     if (["multiselect", "self_multiselect", "checkbox_group"].includes(field.widget)) item[field.key] = [];
     else if (field.widget === "checkbox") item[field.key] = false;
@@ -509,7 +528,8 @@ function makeRepeatableEditor(spec, value) {
     allow_delete: true,
     sortable: spec.sortable !== false,
   }];
-  let activeStepIndex = 0;
+  let activeStepIndex = Math.min(state.repeatableSteps[spec.key] || 0, steps.length - 1);
+  let dependencyRefreshers = [];
   const editor = document.createElement("div");
   editor.className = "repeatableEditor";
 
@@ -529,6 +549,7 @@ function makeRepeatableEditor(spec, value) {
     button.textContent = step.label || `步骤 ${index + 1}`;
     button.addEventListener("click", () => {
       activeStepIndex = index;
+      state.repeatableSteps[spec.key] = index;
       render();
     });
     stepBar.appendChild(button);
@@ -552,6 +573,10 @@ function makeRepeatableEditor(spec, value) {
   const warning = document.createElement("div");
   warning.className = "repeatableWarnings hidden";
   editor.appendChild(warning);
+  const reviewNotice = document.createElement("div");
+  reviewNotice.className = "collectionReviewNotice hidden";
+  reviewNotice.setAttribute("role", "status");
+  editor.appendChild(reviewNotice);
   const cards = document.createElement("div");
   cards.className = "repeatableCards";
   editor.appendChild(cards);
@@ -578,6 +603,7 @@ function makeRepeatableEditor(spec, value) {
       else item[orderField] = index + 1;
     });
     store.value = JSON.stringify(items);
+    dependencyRefreshers.forEach((refresh) => refresh());
     count.textContent = `已添加 ${items.length} 个${itemName}`;
     updateWarning();
     scheduleAutoSave();
@@ -586,12 +612,114 @@ function makeRepeatableEditor(spec, value) {
   function makeItemInput(item, field) {
     const widget = field.widget || "text";
     let control;
-    if (widget === "textarea") {
+    if (widget === "text_list") {
+      control = document.createElement("div");
+      control.className = "repeatableTextList";
+      const entries = item[field.key];
+      const list = document.createElement("div");
+      list.className = "repeatableTextListItems";
+      function renderEntries() {
+        list.replaceChildren();
+        if (!entries.length) {
+          const empty = document.createElement("div");
+          empty.className = "repeatableTextListEmpty";
+          empty.textContent = "暂无信息，点击下方按钮添加";
+          list.appendChild(empty);
+        }
+        entries.forEach((value, index) => {
+          const row = document.createElement("div");
+          row.className = "repeatableTextListRow";
+          const head = document.createElement("div");
+          head.className = "repeatableTextListHead";
+          const number = document.createElement("span");
+          number.textContent = `第 ${index + 1} 条`;
+          const input = document.createElement("textarea");
+          input.rows = field.rows || 3;
+          input.value = value;
+          input.placeholder = field.placeholder || "";
+          input.setAttribute("aria-label", `${field.label || field.key} ${index + 1}`);
+          input.disabled = field.editable === false;
+          input.addEventListener("input", () => { entries[index] = input.value; sync(); });
+          const remove = document.createElement("button");
+          remove.type = "button";
+          remove.className = "repeatableTextListRemove";
+          remove.textContent = "删除";
+          remove.setAttribute("aria-label", `删除${field.label || field.key}第 ${index + 1} 条`);
+          remove.disabled = field.editable === false;
+          remove.addEventListener("click", () => { entries.splice(index, 1); renderEntries(); sync(); });
+          head.append(number, remove);
+          row.append(head, input);
+          list.appendChild(row);
+        });
+      }
+      const addEntry = document.createElement("button");
+      addEntry.type = "button";
+      addEntry.className = "repeatableTextListAdd";
+      addEntry.textContent = field.add_label || "+ 新增信息";
+      addEntry.addEventListener("click", () => {
+        entries.push(""); renderEntries(); sync();
+        list.lastElementChild?.querySelector("textarea")?.focus();
+      });
+      control.append(list, addEntry);
+      renderEntries();
+    } else if (widget === "self_multiselect" && Array.isArray(field.show_results)) {
+      control = document.createElement("div");
+      control.className = "repeatableDependencyCards";
+      const dependencies = Array.isArray(item[field.key]) ? item[field.key] : [];
+      if (!dependencies.length) {
+        const empty = document.createElement("div");
+        empty.className = "repeatableDependencyEmpty";
+        empty.textContent = "无依赖焦点";
+        control.appendChild(empty);
+      }
+      for (const dependencyId of dependencies) {
+        const dependency = items.find((candidate) => String(candidate[idField]) === String(dependencyId));
+        const summary = document.createElement("article");
+        summary.className = "repeatableDependencySummary";
+        const head = document.createElement("div");
+        head.className = "repeatableDependencyCardHead";
+        const badge = document.createElement("span");
+        badge.className = "repeatableDependencyCardId";
+        badge.textContent = String(dependencyId);
+        const title = document.createElement("strong");
+        title.className = "repeatableDependencyCardTitle";
+        title.textContent = dependency ? String(dependency[spec.item_title_field] || itemName) : "焦点不存在";
+        head.append(badge, title);
+        const body = document.createElement("div");
+        body.className = "repeatableDependencyCardBody";
+        summary.append(head, body);
+        for (const resultKey of field.show_results) {
+          const resultField = (spec.item_fields || []).find((candidate) => candidate.key === resultKey);
+          const line = document.createElement("div");
+          line.className = "repeatableDependencyResult";
+          const label = document.createElement("span");
+          label.className = "repeatableDependencyResultLabel";
+          label.textContent = resultField?.label || resultKey;
+          const content = document.createElement("div");
+          content.className = "repeatableDependencyResultContent";
+          line.append(label, content);
+          const refresh = () => {
+            const value = dependency?.[resultKey];
+            const text = Array.isArray(value) ? value.join("；") : isPlainObject(value) ? JSON.stringify(value, null, 2) : value;
+            const missing = text === undefined || text === null || text === "";
+            content.textContent = missing ? "尚未填写" : String(text);
+            content.classList.toggle("empty", missing);
+          };
+          refresh();
+          dependencyRefreshers.push(refresh);
+          body.appendChild(line);
+        }
+        control.appendChild(summary);
+      }
+    } else if (widget === "textarea") {
       control = document.createElement("textarea");
       control.rows = field.rows || 4;
       control.value = item[field.key] || "";
       control.placeholder = field.placeholder || "";
-      control.addEventListener("input", () => { item[field.key] = control.value; sync(); });
+      control.addEventListener("input", () => {
+        item[field.key] = field.nullable && control.value === "" ? null : control.value;
+        sync();
+      });
     } else if (widget === "checkbox") {
       control = document.createElement("input");
       control.type = "checkbox";
@@ -611,7 +739,8 @@ function makeRepeatableEditor(spec, value) {
       control.className = "cascaderControl";
       const delimiter = field.delimiter || "；";
       const paths = optionsFor(field, item).map((option) => option.split(delimiter));
-      let selectedParts = item[field.key] ? String(item[field.key]).split(delimiter) : [];
+      let selectedParts = Array.isArray(item[field.key]) ? [...item[field.key]]
+        : item[field.key] ? String(item[field.key]).split(delimiter) : [];
       function renderLevels() {
         control.innerHTML = "";
         const prefix = [];
@@ -637,7 +766,7 @@ function makeRepeatableEditor(spec, value) {
           select.addEventListener("change", () => {
             selectedParts = selectedParts.slice(0, currentDepth);
             if (select.value) selectedParts.push(select.value);
-            item[field.key] = selectedParts.join(delimiter);
+            item[field.key] = field.value_type === "array" ? [...selectedParts] : selectedParts.join(delimiter);
             renderLevels();
             sync();
           });
@@ -661,6 +790,10 @@ function makeRepeatableEditor(spec, value) {
         }
         return value;
       }));
+      // Preserve saved references even when the current source lacks a candidate.
+      for (const value of selected) {
+        if (!options.includes(value)) options.push(value);
+      }
       if (field.options_from_object === "entries") {
         item[field.key] = options.filter((option) => selected.has(option));
       }
@@ -714,16 +847,21 @@ function makeRepeatableEditor(spec, value) {
         empty.value = "";
         empty.textContent = field.empty_label || "请选择";
         control.appendChild(empty);
-        const current = item[field.key] || "";
+        const current = item[field.key] ?? "";
         if (current && !options.includes(String(current))) options.unshift(String(current));
         for (const value of options) {
           const option = document.createElement("option");
           option.value = value;
-          option.textContent = value;
+          option.textContent = field.option_labels?.[value] ?? value;
           control.appendChild(option);
         }
         control.value = current;
-        control.addEventListener("change", () => { item[field.key] = control.value; sync(); });
+        control.addEventListener("change", () => {
+          item[field.key] = field.value_type === "boolean"
+            ? (control.value === "" ? null : control.value === "true")
+            : control.value;
+          sync();
+        });
       } else {
         control.multiple = true;
         control.size = Math.max(2, Math.min(field.size || 5, Math.max(2, options.length)));
@@ -886,9 +1024,25 @@ function makeRepeatableEditor(spec, value) {
     const grid = document.createElement("div");
     grid.className = "repeatableCardGrid";
     const fieldsByKey = new Map((spec.item_fields || []).map((field) => [field.key, field]));
-    for (const key of step.fields || []) {
-      const field = fieldsByKey.get(key);
-      if (field) grid.appendChild(makeRepeatableControl(field, makeItemInput(item, field)));
+    const configuredSections = step.sections || [];
+    const sectionKeys = new Set(configuredSections.flatMap((section) => section.fields || []));
+    const sections = [...configuredSections, { fields: (step.fields || []).filter((key) => !sectionKeys.has(key)) }];
+    for (const section of sections) {
+      const container = section.label ? document.createElement("section") : grid;
+      if (section.label) {
+        container.className = "repeatableCardSection";
+        const heading = document.createElement("h4");
+        heading.textContent = section.label;
+        container.appendChild(heading);
+        grid.appendChild(container);
+      }
+      for (const key of (step.fields || []).filter((key) => (section.fields || []).includes(key))) {
+        if (!(step.fields || []).includes(key)) continue;
+        const original = fieldsByKey.get(key);
+        if (!original) continue;
+        const field = { ...original, ...step.field_overrides?.[key] };
+        container.appendChild(makeRepeatableControl(field, makeItemInput(item, field)));
+      }
     }
     card.appendChild(grid);
     function updateCollapsedState() {
@@ -1139,7 +1293,10 @@ function makeRepeatableEditor(spec, value) {
   }
 
   function render() {
+    dependencyRefreshers = [];
     const step = steps[activeStepIndex];
+    reviewNotice.dataset.sourceFields = JSON.stringify(step.review_source_fields || []);
+    updateCollectionReviewNotice(reviewNotice);
     [...stepBar.children].forEach((button, index) => button.classList.toggle("active", index === activeStepIndex));
     add.classList.toggle("hidden", step.allow_add === false);
     graphResizeObserver?.disconnect();
@@ -1198,7 +1355,191 @@ function makeRepeatableEditor(spec, value) {
   return editor;
 }
 
+function collectionHasRevisions(key) {
+  const spec = state.template?.fields.find((field) => field.key === key);
+  if (!spec?.backup_field) return false;
+  const store = [...document.querySelectorAll(".collectionValueInput")].find((input) => input.dataset.key === key);
+  const current = store ? JSON.parse(store.value) : getByPath(state.currentRow, key);
+  const original = getByPath(state.currentRow, spec.backup_field) ?? getByPath(state.currentRow, key);
+  return JSON.stringify(current) !== JSON.stringify(original);
+}
+
+function updateCollectionReviewNotice(notice) {
+  const keys = JSON.parse(notice.dataset.sourceFields || "[]").filter(collectionHasRevisions);
+  const labels = keys.map((key) => fieldSpecFor(key).label || key);
+  notice.textContent = labels.length ? `${labels.join("、")}已发生修订，请检查“判断所依据的案件材料”是否需要更新。` : "";
+  notice.classList.toggle("hidden", !keys.length);
+}
+
+function makeCollectionEditor(spec, value) {
+  const editor = document.createElement("div");
+  editor.className = "collectionEditor";
+  if (!isPlainObject(value)) {
+    const error = document.createElement("div");
+    error.className = "collectionCardsEmpty";
+    error.textContent = "当前数据不是对象，无法修订";
+    editor.appendChild(error);
+    return editor;
+  }
+  const clone = (v) => JSON.parse(JSON.stringify(v));
+  let items = clone(value);
+  const original = clone(getByPath(state.currentRow, spec.backup_field) ?? value);
+  const editableFields = (spec.card_fields || []).filter((field) => field.editable);
+  let editingKey = null;
+  const openKeys = new Set(spec.collapsed ? [] : Object.keys(items));
+  const store = document.createElement("input");
+  store.type = "hidden";
+  store.className = "fieldInput collectionValueInput";
+  store.dataset.key = spec.key;
+  store.dataset.widget = "json";
+  store.value = JSON.stringify(items);
+  const content = document.createElement("div");
+  editor.append(store, content);
+
+  function sync() {
+    store.value = JSON.stringify(items);
+    document.querySelectorAll(".collectionReviewNotice").forEach(updateCollectionReviewNotice);
+    scheduleAutoSave();
+  }
+  function button(label, key, action) {
+    const control = document.createElement("button");
+    control.type = "button";
+    control.textContent = label;
+    control.setAttribute("aria-label", `${label}：${key}`);
+    control.disabled = editingKey !== null;
+    control.addEventListener("click", action);
+    return control;
+  }
+  function render() {
+    const list = makeCollectionCards({ ...spec, editable: false }, items);
+    Object.entries(items).forEach(([key, item], index) => {
+      const card = list.children[index];
+      const summary = card.querySelector("summary");
+      const body = card.querySelector(".collectionCardBody");
+      const changed = editableFields.length > 0 && original[key] && JSON.stringify(item) !== JSON.stringify(original[key]);
+      card.open = openKeys.has(key);
+      card.addEventListener("toggle", () => {
+        if (!card.isConnected) return;
+        if (card.open) openKeys.add(key); else openKeys.delete(key);
+      });
+      if (changed) {
+        const badge = document.createElement("span");
+        badge.className = "collectionModifiedBadge";
+        badge.textContent = "已修正";
+        summary.appendChild(badge);
+      }
+      const actions = document.createElement("div");
+      actions.className = "collectionCardActions";
+      if (editableFields.length) actions.appendChild(button("修正", key, () => {
+        editingKey = key;
+        openKeys.add(key);
+        store.dataset.validationError = "请先应用或取消正在进行的证据修正";
+        render();
+        content.querySelector(".collectionEditInput")?.focus();
+      }));
+      if (spec.allow_delete) {
+        const remove = button("删除", key, () => {
+          delete items[key];
+          openKeys.delete(key);
+          render(); sync();
+        });
+        remove.className = "dangerText";
+        actions.appendChild(remove);
+      }
+      body.prepend(actions);
+      if (editingKey === key) {
+        const form = document.createElement("div");
+        form.className = "collectionEditForm";
+        const inputs = editableFields.map((field) => {
+          const label = document.createElement("label");
+          label.textContent = field.label || field.key;
+          const input = document.createElement("textarea");
+          input.className = "collectionEditInput";
+          input.rows = field.rows || 10;
+          input.value = getByPath(item, field.key) ?? "";
+          label.appendChild(input);
+          form.appendChild(label);
+          return { field, input };
+        });
+        const error = document.createElement("div");
+        error.className = "collectionEditError";
+        error.setAttribute("role", "alert");
+        const apply = button("应用修改", key, () => {
+          if (inputs.some(({ input }) => !input.value.trim())) {
+            error.textContent = "内容不能为空；如不需要这份证据，请取消后删除。";
+            return;
+          }
+          inputs.forEach(({ field, input }) => setByPath(item, field.key, input.value));
+          editingKey = null;
+          delete store.dataset.validationError;
+          render(); sync();
+        });
+        const cancel = button("取消", key, () => {
+          editingKey = null;
+          delete store.dataset.validationError;
+          render();
+        });
+        apply.disabled = cancel.disabled = false;
+        const formActions = document.createElement("div");
+        formActions.className = "collectionCardActions";
+        formActions.append(apply, cancel);
+        form.append(error, formActions);
+        body.prepend(form);
+        // 编辑时只显示一份正文；其他只读信息仍保留供对照。
+        body.querySelectorAll(".collectionCardField").forEach((block) => {
+          if (editableFields.some((field) => field.key === block.dataset.key)) block.classList.add("hidden");
+        });
+      }
+      if (changed) {
+        const source = document.createElement("details");
+        source.className = "collectionOriginal";
+        const title = document.createElement("summary");
+        title.textContent = "查看原文";
+        source.appendChild(title);
+        for (const field of editableFields) {
+          const text = document.createElement("div");
+          text.className = "collectionCardFieldValue";
+          text.textContent = getByPath(original[key], field.key) ?? "";
+          source.appendChild(text);
+        }
+        body.append(source, button("恢复原文", key, () => {
+          items[key] = clone(original[key]);
+          render(); sync();
+        }));
+      }
+    });
+    content.replaceChildren(list);
+    const deleted = Object.keys(original).filter((key) => !Object.hasOwn(items, key));
+    if (deleted.length) {
+      const archive = document.createElement("details");
+      archive.className = "collectionDeleted";
+      const summary = document.createElement("summary");
+      summary.textContent = `已删除证据（${deleted.length}）`;
+      archive.appendChild(summary);
+      for (const key of deleted) {
+        const row = document.createElement("div");
+        row.className = "collectionDeletedRow";
+        const title = document.createElement("span");
+        title.textContent = key;
+        row.append(title, button("恢复", key, () => {
+          items[key] = clone(original[key]);
+          // 恢复原始顺序，避免删除后恢复留下虚假的修订标记。
+          items = Object.fromEntries(Object.keys(original).filter((name) => Object.hasOwn(items, name))
+            .map((name) => [name, items[name]]));
+          openKeys.add(key);
+          render(); sync();
+        }));
+        archive.appendChild(row);
+      }
+      content.appendChild(archive);
+    }
+  }
+  render();
+  return editor;
+}
+
 function makeCollectionCards(spec, value) {
+  if (spec.editable && spec.backup_field) return makeCollectionEditor(spec, value);
   const container = document.createElement("div");
   container.className = "collectionCards";
   const entries = Array.isArray(value)
@@ -1233,6 +1574,7 @@ function makeCollectionCards(spec, value) {
       visibleCount += 1;
       const block = document.createElement("div");
       block.className = "collectionCardField";
+      block.dataset.key = field.key;
       const label = document.createElement("div");
       label.className = "collectionCardFieldLabel";
       label.textContent = field.label || field.key;
@@ -1287,7 +1629,7 @@ function makeFieldEditor(spec, value) {
     ro.className = "roBadge";
     ro.textContent = "只读";
     headRight.appendChild(ro);
-  } else if (spec.key !== LABELLED_FIELD && spec.widget !== "repeatable") {
+  } else if (spec.key !== LABELLED_FIELD && !["repeatable", "collection_cards"].includes(spec.widget)) {
     const del = document.createElement("button");
     del.type = "button";
     del.className = "fieldDelBtn";
@@ -1438,7 +1780,8 @@ function renderDetail() {
   for (const spec of tplFields) {
     rendered.add(spec.key);
     if (spec.key === LABELLED_FIELD || spec.hidden) continue;
-    (spec.editable === false ? sourceSpecs : annotationSpecs).push(spec);
+    const inSource = spec.panel ? spec.panel === "source" : spec.editable === false;
+    (inSource ? sourceSpecs : annotationSpecs).push(spec);
   }
 
   // 数据中存在但模版未收录的 key。
@@ -1511,7 +1854,12 @@ function updateRowNav() {
 }
 
 async function selectRow(index) {
+  if (state.selectedIndex !== null) {
+    if (index === state.selectedIndex) return;
+    if (!await applyCurrent({ silent: true, navigating: true })) return;
+  }
   state.selectedIndex = index;
+  state.repeatableSteps = {};
   state.deletedKeys = new Set();
   state.extraKeys = [];
   await refreshList();
@@ -1531,11 +1879,6 @@ async function gotoRow(delta) {
   if (state.selectedIndex === null) return;
   const target = state.selectedIndex + delta;
   if (target < 0 || target >= state.datasetTotal) return;
-  const ok = await applyCurrent({ silent: true, navigating: true });
-  if (!ok) {
-    toast("当前条目保存失败，已阻止切换", "err", 3000);
-    return;
-  }
   await selectRow(target);
 }
 
@@ -1547,12 +1890,12 @@ function collectChanges() {
   const row = state.currentRow;
   const sets = {};
   const errors = [];
-  const inputs = $("fieldsContainer").querySelectorAll(".fieldInput");
+  const inputs = document.querySelectorAll("#fieldsContainer .fieldInput, #sourceFieldsContainer .fieldInput");
   for (const input of inputs) {
     const key = input.dataset.key;
     if (input.disabled || state.deletedKeys.has(key)) continue;
     const widget = input.dataset.widget;
-    if (widget === "repeatable" && input.dataset.validationError) {
+    if (input.dataset.validationError) {
       errors.push(`${key}: ${input.dataset.validationError}`);
       continue;
     }
@@ -1614,6 +1957,7 @@ async function applyCurrent({ silent = false, navigating = false } = {}) {
     });
     // 同步本地数据
     for (const [k, v] of Object.entries(sets)) setByPath(state.currentRow, k, v);
+    for (const [k, v] of Object.entries(r.collection_backups || {})) setByPath(state.currentRow, k, v);
     for (const k of deletes) deleteByPath(state.currentRow, k);
     const hadDeletes = deletes.length > 0;
     state.deletedKeys = new Set();
@@ -1622,7 +1966,7 @@ async function applyCurrent({ silent = false, navigating = false } = {}) {
     // 静默保存（自动保存）时不重建表单，避免打断正在输入的用户；
     // 有字段删除、或即将切换条目时才重新渲染。
     const typing = document.activeElement?.classList?.contains("fieldInput") ||
-      Boolean(document.activeElement?.closest?.(".repeatableEditor"));
+      Boolean(document.activeElement?.closest?.(".repeatableEditor, .collectionEditor"));
     if (!silent || hadDeletes || (!typing && !navigating)) {
       renderDetail();
     } else {
@@ -1657,6 +2001,7 @@ function scheduleAutoSave() {
 function autoSaveIfIdle() {
   if (state.template?.save_mode !== "auto") return;
   if (state.selectedIndex === null) return;
+  if (document.querySelector(".collectionEditInput")) return;
   if (Date.now() - state.lastInputAt < AUTOSAVE_IDLE_MS - 100) return; // 仍在输入
   applyCurrent({ silent: true });
 }
@@ -1665,6 +2010,7 @@ function startAutoSaveLoop() {
   window.setInterval(() => {
     if (state.template?.save_mode !== "auto") return;
     if (state.selectedIndex === null) return;
+    if (document.querySelector(".collectionEditInput")) return;
     // 用户正在输入时跳过本次周期保存，停止输入后由空闲判定接手
     if (Date.now() - state.lastInputAt < AUTOSAVE_IDLE_MS) return;
     applyCurrent({ silent: true });
@@ -1911,7 +2257,7 @@ const REPEATABLE_CONFIG_KEYS = [
 ];
 const REPEATABLE_ITEM_WIDGETS = [
   "text", "textarea", "number", "checkbox", "select", "multiselect",
-  "self_multiselect", "cascader", "checkbox_group",
+  "self_multiselect", "cascader", "checkbox_group", "text_list",
 ];
 
 function repeatableConfigFromField(field) {
@@ -2008,8 +2354,19 @@ function configSection(titleText, addLabel = "", onAdd = null) {
 }
 
 function updateRepeatableKeyReferences(config, oldKey, newKey) {
+  if (oldKey === newKey) return;
   for (const step of config.steps || []) {
     step.fields = (step.fields || []).map((key) => key === oldKey ? newKey : key);
+    for (const section of step.sections || []) {
+      section.fields = (section.fields || []).map((key) => key === oldKey ? newKey : key);
+    }
+    if (step.field_overrides?.[oldKey]) {
+      step.field_overrides[newKey] = step.field_overrides[oldKey];
+      delete step.field_overrides[oldKey];
+    }
+    for (const override of Object.values(step.field_overrides || {})) {
+      if (override.show_results) override.show_results = override.show_results.map((key) => key === oldKey ? newKey : key);
+    }
     if (step.relation_field === oldKey) step.relation_field = newKey;
     if (step.group_by_relation === oldKey) step.group_by_relation = newKey;
   }
@@ -2064,6 +2421,141 @@ function renderRepeatableStepFields(container, step, itemFields) {
     row.append(checkbox, name);
     container.appendChild(row);
   }
+}
+
+function renderRepeatableStepLayout(container, step, itemFields) {
+  const layout = document.createElement("div");
+  layout.className = "repeatableLayoutConfig";
+  const title = document.createElement("strong");
+  title.className = "repeatableStepFieldsTitle";
+  title.textContent = "卡片分区";
+  layout.appendChild(title);
+  const sections = step.sections || [];
+  sections.forEach((section, index) => {
+    const row = document.createElement("div");
+    row.className = "repeatableSectionConfigRow";
+    const name = document.createElement("input");
+    name.value = section.label;
+    name.placeholder = "分区名称";
+    name.setAttribute("aria-label", `分区 ${index + 1} 名称`);
+    name.addEventListener("input", () => { section.label = name.value; });
+    row.appendChild(name);
+    for (const [label, delta] of [["上移", -1], ["下移", 1]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.disabled = index + delta < 0 || index + delta >= sections.length;
+      button.addEventListener("click", () => { moveConfigItem(sections, index, delta); renderRepeatableConfigDialog(); });
+      row.appendChild(button);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "dangerText";
+    remove.textContent = "删除分区";
+    remove.addEventListener("click", () => {
+      sections.splice(index, 1);
+      if (!sections.length) delete step.sections;
+      renderRepeatableConfigDialog();
+    });
+    row.appendChild(remove);
+    layout.appendChild(row);
+  });
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "+ 添加分区";
+  add.className = "repeatableTextListAdd";
+  add.addEventListener("click", () => {
+    step.sections ||= [];
+    step.sections.push({ label: `分区 ${step.sections.length + 1}`, fields: [] });
+    renderRepeatableConfigDialog();
+  });
+  layout.appendChild(add);
+  if (sections.length) {
+    for (const key of step.fields || []) {
+      const field = itemFields.find((candidate) => candidate.key === key);
+      if (!field) continue;
+      const current = sections.findIndex((section) => (section.fields || []).includes(key));
+      layout.appendChild(repeatableSelectControl(
+        `${field.label || key} · 所在分区`, String(current),
+        [["-1", "未分区（显示在末尾）"], ...sections.map((section, index) => [String(index), section.label || `分区 ${index + 1}`])],
+        (value) => {
+          sections.forEach((section) => { section.fields = (section.fields || []).filter((candidate) => candidate !== key); });
+          if (Number(value) >= 0) sections[Number(value)].fields.push(key);
+        },
+      ));
+    }
+  }
+  const help = document.createElement("div");
+  help.className = "tplHint";
+  help.textContent = "分区内字段顺序遵循上方的子字段顺序；删除分区会保留字段。";
+  layout.appendChild(help);
+  container.appendChild(layout);
+
+  const overrides = document.createElement("div");
+  overrides.className = "repeatableLayoutConfig";
+  const overrideTitle = document.createElement("strong");
+  overrideTitle.className = "repeatableStepFieldsTitle";
+  overrideTitle.textContent = "本步骤字段展示与关联结果";
+  overrides.appendChild(overrideTitle);
+  for (const key of step.fields || []) {
+    const field = itemFields.find((candidate) => candidate.key === key);
+    if (!field) continue;
+    const getOverride = () => {
+      step.field_overrides ||= {};
+      return step.field_overrides[key] ||= {};
+    };
+    const current = step.field_overrides?.[key] || {};
+    const details = document.createElement("details");
+    details.className = "repeatableFieldOverride";
+    const summary = document.createElement("summary");
+    summary.textContent = field.label || key;
+    const grid = document.createElement("div");
+    grid.className = "repeatableConfigGrid";
+    for (const [property, label] of [["label", "本步骤显示名"], ["hint", "本步骤提示"]]) {
+      grid.appendChild(repeatableTextControl(label, current[property] ?? "", (value) => {
+        if (value) getOverride()[property] = value;
+        else if (step.field_overrides?.[key]) delete step.field_overrides[key][property];
+      }, { placeholder: field[property] || "沿用子字段设置" }));
+    }
+    for (const [property, label] of [["editable", "编辑方式"], ["wide", "字段宽度"]]) {
+      grid.appendChild(repeatableSelectControl(label,
+        current[property] === undefined ? "inherit" : String(current[property]),
+        [["inherit", "沿用子字段设置"], ["true", property === "editable" ? "可编辑" : "占满整行"], ["false", property === "editable" ? "只读" : "半行"]],
+        (value) => {
+          if (value === "inherit") { if (step.field_overrides?.[key]) delete step.field_overrides[key][property]; }
+          else getOverride()[property] = value === "true";
+        },
+      ));
+    }
+    details.append(summary, grid);
+    if (field.widget === "self_multiselect") {
+      const checks = document.createElement("div");
+      checks.className = "repeatableConfigChecks";
+      const enabled = Array.isArray(current.show_results);
+      checks.appendChild(repeatableCheck("展示关联子项的结果", enabled, (value) => {
+        if (value) getOverride().show_results = [];
+        else if (step.field_overrides?.[key]) delete step.field_overrides[key].show_results;
+        renderRepeatableConfigDialog();
+      }));
+      details.appendChild(checks);
+      if (enabled) {
+        details.open = true;
+        const resultChecks = document.createElement("div");
+        resultChecks.className = "repeatableConfigChecks";
+        for (const resultField of itemFields.filter((candidate) => candidate.key !== key)) {
+          resultChecks.appendChild(repeatableCheck(resultField.label || resultField.key,
+            current.show_results.includes(resultField.key), (value) => {
+              const selected = new Set(getOverride().show_results || []);
+              if (value) selected.add(resultField.key); else selected.delete(resultField.key);
+              getOverride().show_results = itemFields.filter((candidate) => selected.has(candidate.key)).map((candidate) => candidate.key);
+            }));
+        }
+        details.appendChild(resultChecks);
+      }
+    }
+    overrides.appendChild(details);
+  }
+  container.appendChild(overrides);
 }
 
 function renderRepeatableConfigDialog() {
@@ -2158,6 +2650,13 @@ function renderRepeatableConfigDialog() {
       config.item_fields.splice(index, 1);
       for (const step of config.steps || []) {
         step.fields = (step.fields || []).filter((key) => key !== removedKey);
+        for (const section of step.sections || []) {
+          section.fields = (section.fields || []).filter((key) => key !== removedKey);
+        }
+        if (step.field_overrides) delete step.field_overrides[removedKey];
+        for (const override of Object.values(step.field_overrides || {})) {
+          if (override.show_results) override.show_results = override.show_results.filter((key) => key !== removedKey);
+        }
         if (step.relation_field === removedKey) delete step.relation_field;
         if (step.group_by_relation === removedKey) delete step.group_by_relation;
       }
@@ -2185,6 +2684,9 @@ function renderRepeatableConfigDialog() {
       repeatableTextControl("占位文字", field.placeholder, (value) => { field.placeholder = value; }),
       repeatableTextControl("高度（行）", field.rows || 1, (value) => { field.rows = Math.max(1, Number(value) || 1); }, { type: "number" }),
     );
+    if (field.widget === "text_list") {
+      grid.appendChild(repeatableTextControl("新增条目按钮文字", field.add_label || "+ 新增信息", (value) => { field.add_label = value; }));
+    }
 
     const optionWidgets = new Set(["select", "multiselect", "cascader", "checkbox_group"]);
     if (optionWidgets.has(field.widget)) {
@@ -2313,6 +2815,7 @@ function renderRepeatableConfigDialog() {
     stepFields.className = "repeatableStepFields";
     renderRepeatableStepFields(stepFields, step, config.item_fields);
     grid.appendChild(stepFields);
+    if (step.view !== "graph") renderRepeatableStepLayout(grid, step, config.item_fields);
     card.append(head, grid);
     const checks = document.createElement("div");
     checks.className = "repeatableConfigChecks";
@@ -2346,6 +2849,21 @@ function validateRepeatableConfig(config) {
   if (new Set(stepIds).size !== stepIds.length) return "步骤 ID 不能重复";
   const relations = new Set(config.item_fields.filter((field) => field.widget === "self_multiselect").map((field) => field.key));
   for (const step of config.steps || []) {
+    if ((step.fields || []).some((key) => !keys.includes(key))) return `步骤“${step.label || step.id}”包含未知字段`;
+    const placed = new Set();
+    for (const section of step.sections || []) {
+      if (!section.label?.trim()) return `步骤“${step.label || step.id}”的分区名称不能为空`;
+      for (const key of section.fields || []) {
+        if (!keys.includes(key) || placed.has(key)) return `步骤“${step.label || step.id}”的分区包含未知或重复字段`;
+        placed.add(key);
+      }
+    }
+    for (const [key, override] of Object.entries(step.field_overrides || {})) {
+      if (!keys.includes(key)) return `步骤“${step.label || step.id}”的展示设置包含未知字段`;
+      if (override.show_results && (!relations.has(key) || override.show_results.some((resultKey) => !keys.includes(resultKey)))) {
+        return `步骤“${step.label || step.id}”的关联结果设置无效`;
+      }
+    }
     if (step.view === "graph" && !relations.has(step.relation_field)) return `步骤“${step.label || step.id}”需要选择关系字段`;
     if (step.group_by_relation && !relations.has(step.group_by_relation)) return `步骤“${step.label || step.id}”的分组字段无效`;
   }
@@ -2474,6 +2992,22 @@ function makeTplFieldRow(f, i) {
   editable.checked = f.editable !== false;
   editable.addEventListener("change", () => { f.editable = editable.checked; });
 
+  const panel = document.createElement("select");
+  panel.className = "tplPanelSelect";
+  panel.setAttribute("aria-label", `${f.label || f.key}的显示区域`);
+  panel.title = "自动分区：只读字段放资料区，可编辑字段放标注区；也可单独指定位置，不改变编辑权限";
+  for (const [value, text] of [["", "自动分区"], ["source", "资料区"], ["annotation", "标注区"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = text;
+    panel.appendChild(option);
+  }
+  panel.value = f.panel || "";
+  panel.addEventListener("change", () => {
+    if (panel.value) f.panel = panel.value;
+    else delete f.panel;
+  });
+
   const hidden = document.createElement("input");
   hidden.type = "checkbox";
   hidden.checked = Boolean(f.hidden);
@@ -2510,6 +3044,7 @@ function makeTplFieldRow(f, i) {
   row.appendChild(rows);
   row.appendChild(options);
   row.appendChild(wrapCenter(editable));
+  row.appendChild(panel);
   row.appendChild(wrapCenter(hidden));
   row.appendChild(group);
   row.appendChild(wrapCenter(filterable));
@@ -2534,7 +3069,7 @@ function makeTplFieldRow(f, i) {
   });
 
   // 输入控件在 draggable 容器里需要阻止拖拽劫持
-  for (const el of [key, label, hint, widget, rows, options, group]) {
+  for (const el of [key, label, hint, widget, rows, options, panel, group]) {
     el.addEventListener("mousedown", () => { row.draggable = false; });
     el.addEventListener("blur", () => { row.draggable = true; });
   }
@@ -2753,6 +3288,7 @@ function wire() {
   $("saveBtn").addEventListener("click", async () => {
     $("saveBtn").disabled = true;
     try {
+      if (!await applyCurrent({ silent: true })) return;
       const response = await fetch("/api/save", { method: "POST" });
       if (!response.ok) throw new Error(await response.text());
       const blob = await response.blob();

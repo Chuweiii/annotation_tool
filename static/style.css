@@ -415,6 +415,29 @@ input.chk{
   padding:16px;
 }
 .repeatableCardGrid[hidden]{display:none}
+.repeatableCardSection{grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;border-top:1px solid var(--border);padding-top:14px}
+.repeatableCardSection:first-child{border-top:0;padding-top:0}
+.repeatableCardSection h4{grid-column:1 / -1;margin:0;font-size:14px;color:#4338ca}
+.repeatableTextList{display:flex;flex-direction:column;gap:10px}
+.repeatableTextListItems{display:flex;flex-direction:column;gap:10px}
+.repeatableTextListRow{padding:10px 12px 12px;border:1px solid var(--border-light);border-radius:10px;background:var(--panel2)}
+.repeatableTextListHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:12px;color:var(--muted)}
+.repeatableTextListRow textarea{display:block;min-width:0;background:#fff;min-height:76px}
+.repeatableTextListRemove{padding:3px 6px;border:0;background:transparent;box-shadow:none;color:var(--muted);font-size:12px}
+.repeatableTextListRemove:hover{color:#be123c;background:rgba(225,29,72,.06)}
+.repeatableTextListAdd{align-self:flex-start;padding:7px 12px;color:#4338ca;border:1px dashed rgba(91,75,255,.35);background:rgba(91,75,255,.035);font-size:12px}
+.repeatableTextListEmpty{padding:14px;border:1px dashed var(--border);border-radius:8px;font-size:12px;color:var(--muted)}
+.repeatableDependencyCards{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.repeatableDependencySummary{min-width:0;border:1px solid var(--border-light);border-radius:10px;background:#fff;overflow:hidden}
+.repeatableDependencyCardHead{display:flex;align-items:flex-start;gap:10px;padding:12px 14px;background:var(--panel2)}
+.repeatableDependencyCardId{flex-shrink:0;padding:3px 7px;border-radius:5px;background:rgba(91,75,255,.09);color:#4338ca;font-size:12px;font-weight:700}
+.repeatableDependencyCardTitle{min-width:0;font-size:13px;line-height:1.65;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.repeatableDependencyCardBody{display:flex;flex-direction:column;gap:14px;padding:14px}
+.repeatableDependencyResult{display:flex;flex-direction:column;gap:5px}
+.repeatableDependencyResultLabel{font-size:12px;color:var(--muted)}
+.repeatableDependencyResultContent{font-size:13px;line-height:1.7;color:var(--text);white-space:pre-wrap;overflow-wrap:anywhere}
+.repeatableDependencyResultContent.empty{color:var(--muted)}
+.repeatableDependencyEmpty{padding:14px;border:1px dashed var(--border);border-radius:8px;font-size:12px;color:var(--muted)}
 .repeatableControl{display:flex;flex-direction:column;gap:6px;min-width:0}
 .repeatableControl.wide{grid-column:1 / -1}
 .repeatableControlLabel{font-size:13px;font-weight:600;color:var(--text)}
@@ -510,6 +533,25 @@ input.chk{
 .collectionCardFieldLabel{font-size:11px;font-weight:700;color:var(--muted)}
 .collectionCardFieldValue{font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
 .collectionCardsEmpty{padding:18px;color:var(--muted);font-size:12px;text-align:center}
+.collectionEditor{min-width:0}
+.collectionCardActions{display:flex;flex-wrap:wrap;gap:8px}
+.collectionCardActions button{font-size:12px;padding:4px 10px}
+.collectionModifiedBadge{
+  display:inline-block;margin-left:8px;padding:2px 7px;border-radius:999px;
+  font-size:11px;font-weight:400;color:#92400e;background:#fef3c7;
+}
+.collectionEditForm{display:flex;flex-direction:column;gap:8px}
+.collectionEditForm label{display:flex;flex-direction:column;gap:6px;font-size:12px;font-weight:600}
+.collectionEditInput{width:100%;resize:vertical;font-size:13px;line-height:1.6}
+.collectionEditError{font-size:12px;color:#be123c}
+.collectionOriginal{border-top:1px solid var(--border);padding-top:8px}
+.collectionOriginal summary{padding:6px 0;background:transparent;font-weight:400;font-size:12px}
+.collectionOriginal .collectionCardFieldValue{padding-top:8px;color:var(--muted)}
+.collectionDeleted{margin-top:12px;border:1px dashed var(--border);border-radius:8px;padding:10px}
+.collectionDeleted > summary{cursor:pointer;font-size:12px;color:var(--muted)}
+.collectionDeletedRow{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-top:10px;font-size:12px}
+.collectionDeletedRow span{min-width:0;overflow-wrap:anywhere}
+.collectionReviewNotice{padding:10px 12px;border-radius:8px;background:#fffbeb;color:#92400e;font-size:12px;line-height:1.6}
 
 /* ---- 模型推理 ---- */
 .inferSection{
@@ -559,7 +601,7 @@ input.chk{
 
 .tplTableHead,.tplRow{
   display:grid;
-  grid-template-columns: 26px 1fr 0.9fr 1fr 88px 60px 1.2fr 36px 36px 72px 36px 52px;
+  grid-template-columns: 26px minmax(0,1fr) minmax(0,.9fr) minmax(0,1fr) 88px 60px minmax(0,1.2fr) 36px 104px 36px 72px 36px 52px;
   gap:8px;
   align-items:center;
 }
@@ -571,6 +613,7 @@ input.chk{
   border-bottom:1px solid var(--border-light);
 }
 .tplRow.dragging{opacity:.45}
+.tplTableHead > *,.tplRow > *{min-width:0}
 .tplRow input,.tplRow select,.tplRow textarea{padding:6px 8px;font-size:12px;border-radius:6px}
 .tplRow textarea{resize:vertical;min-height:34px}
 .tplHandle{
@@ -634,6 +677,15 @@ input.chk{
 .repeatableStepFieldRow{display:flex;align-items:center;gap:7px;padding:4px 0;font-size:12px}
 .repeatableStepFieldRow .fieldName{flex:1;min-width:0;word-break:break-all}
 .repeatableStepFieldRow button{padding:2px 7px;font-size:11px}
+.repeatableLayoutConfig{grid-column:1 / -1;display:flex;flex-direction:column;gap:10px;border-top:1px solid var(--border-light);padding-top:12px}
+.repeatableLayoutConfig .repeatableConfigGrid{padding:10px}
+.repeatableSectionConfigRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.repeatableSectionConfigRow input{flex:1;min-width:100px}
+.repeatableSectionConfigRow button{padding:5px 8px;font-size:12px}
+.repeatableFieldPlacement{display:grid;grid-template-columns:minmax(0,1fr) minmax(120px,1fr);align-items:center;gap:12px;font-size:12px}
+.repeatableFieldOverride{border:1px solid var(--border-light);border-radius:8px;overflow:hidden}
+.repeatableFieldOverride summary{cursor:pointer;padding:10px;font-size:12px;color:var(--text);background:var(--panel2)}
+.repeatableFieldOverride .repeatableConfigChecks{padding:10px;flex-wrap:wrap}
 .repeatableConfigEmpty{padding:18px;text-align:center;color:var(--muted);font-size:12px}
 
 .toast{
@@ -665,6 +717,7 @@ input.chk{
 @media (max-width: 720px){
   .fieldGroup{grid-template-columns:1fr !important}
   .repeatableCardGrid{grid-template-columns:1fr}
+  .repeatableCardSection{grid-template-columns:1fr}
   .repeatableControl.wide{grid-column:auto}
   .repeatableCardHead{align-items:flex-start;flex-direction:column}
   .collectionCards{grid-template-columns:1fr}
