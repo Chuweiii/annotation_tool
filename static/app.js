@@ -370,6 +370,10 @@ function valueToWidgetText(v, widget) {
   return JSON.stringify(v);
 }
 
+function repeatableFieldVisible(field, item) {
+  return !field.visible_if || item[field.visible_if.field] === field.visible_if.equals;
+}
+
 function repeatableWarnings(items, spec, visibleKeys = null) {
   const idField = spec.item_id_field || "id";
   const ids = new Set(items.map((item) => item[idField]));
@@ -378,6 +382,7 @@ function repeatableWarnings(items, spec, visibleKeys = null) {
     const itemId = item[idField];
     for (const field of spec.item_fields || []) {
       if (visibleKeys && !visibleKeys.has(field.key)) continue;
+      if (!repeatableFieldVisible(field, item)) continue;
       const value = item[field.key];
       if (field.required && (value === "" || value === null || value === undefined || (Array.isArray(value) && !value.length))) {
         warnings.push(`${itemId} 缺少必填项“${field.label || field.key}”`);
@@ -476,7 +481,11 @@ function normalizeRepeatableItem(value, index, spec) {
     }
     if (field.widget === "text_list") {
       const value = item[field.key];
-      item[field.key] = Array.isArray(value) ? value.map(String) : value ? [String(value)] : [];
+      const entries = Array.isArray(value) ? value : value ? [value] : [];
+      item[field.key] = entries.map((entry) => Array.isArray(field.source_options)
+        ? (isPlainObject(entry) ? { ...entry, source: String(entry.source ?? ""), content: String(entry.content ?? "") }
+          : { source: "", content: String(entry) })
+        : String(entry));
       continue;
     }
     if (item[field.key] !== undefined && item[field.key] !== null) continue;
@@ -530,6 +539,7 @@ function makeRepeatableEditor(spec, value) {
   }];
   let activeStepIndex = Math.min(state.repeatableSteps[spec.key] || 0, steps.length - 1);
   let dependencyRefreshers = [];
+  let visibilityRefreshers = [];
   const editor = document.createElement("div");
   editor.className = "repeatableEditor";
 
@@ -604,6 +614,7 @@ function makeRepeatableEditor(spec, value) {
     });
     store.value = JSON.stringify(items);
     dependencyRefreshers.forEach((refresh) => refresh());
+    visibilityRefreshers.forEach((refresh) => refresh());
     count.textContent = `已添加 ${items.length} 个${itemName}`;
     updateWarning();
     scheduleAutoSave();
@@ -635,11 +646,16 @@ function makeRepeatableEditor(spec, value) {
           number.textContent = `第 ${index + 1} 条`;
           const input = document.createElement("textarea");
           input.rows = field.rows || 3;
-          input.value = value;
+          const hasSource = Array.isArray(field.source_options);
+          input.value = hasSource ? value.content : value;
           input.placeholder = field.placeholder || "";
           input.setAttribute("aria-label", `${field.label || field.key} ${index + 1}`);
           input.disabled = field.editable === false;
-          input.addEventListener("input", () => { entries[index] = input.value; sync(); });
+          input.addEventListener("input", () => {
+            if (hasSource) entries[index].content = input.value;
+            else entries[index] = input.value;
+            sync();
+          });
           const remove = document.createElement("button");
           remove.type = "button";
           remove.className = "repeatableTextListRemove";
@@ -648,7 +664,26 @@ function makeRepeatableEditor(spec, value) {
           remove.disabled = field.editable === false;
           remove.addEventListener("click", () => { entries.splice(index, 1); renderEntries(); sync(); });
           head.append(number, remove);
-          row.append(head, input);
+          row.appendChild(head);
+          if (hasSource) {
+            const body = document.createElement("div");
+            body.className = "repeatableTextListSourceBody";
+            const source = document.createElement("select");
+            source.setAttribute("aria-label", `${field.label || field.key} ${index + 1} 来源`);
+            source.disabled = field.editable === false;
+            const choices = ["", ...field.source_options];
+            if (value.source && !choices.includes(value.source)) choices.push(value.source);
+            for (const choice of choices) {
+              const option = document.createElement("option");
+              option.value = choice;
+              option.textContent = choice || "请选择来源";
+              source.appendChild(option);
+            }
+            source.value = value.source;
+            source.addEventListener("change", () => { entries[index].source = source.value; sync(); });
+            body.append(source, input);
+            row.appendChild(body);
+          } else row.appendChild(input);
           list.appendChild(row);
         });
       }
@@ -657,7 +692,8 @@ function makeRepeatableEditor(spec, value) {
       addEntry.className = "repeatableTextListAdd";
       addEntry.textContent = field.add_label || "+ 新增信息";
       addEntry.addEventListener("click", () => {
-        entries.push(""); renderEntries(); sync();
+        entries.push(Array.isArray(field.source_options) ? { source: "", content: "" } : "");
+        renderEntries(); sync();
         list.lastElementChild?.querySelector("textarea")?.focus();
       });
       control.append(list, addEntry);
@@ -669,7 +705,7 @@ function makeRepeatableEditor(spec, value) {
       if (!dependencies.length) {
         const empty = document.createElement("div");
         empty.className = "repeatableDependencyEmpty";
-        empty.textContent = "无依赖焦点";
+        empty.textContent = `无依赖${itemName}`;
         control.appendChild(empty);
       }
       for (const dependencyId of dependencies) {
@@ -683,7 +719,7 @@ function makeRepeatableEditor(spec, value) {
         badge.textContent = String(dependencyId);
         const title = document.createElement("strong");
         title.className = "repeatableDependencyCardTitle";
-        title.textContent = dependency ? String(dependency[spec.item_title_field] || itemName) : "焦点不存在";
+        title.textContent = dependency ? String(dependency[spec.item_title_field] || itemName) : `${itemName}不存在`;
         head.append(badge, title);
         const body = document.createElement("div");
         body.className = "repeatableDependencyCardBody";
@@ -1041,7 +1077,13 @@ function makeRepeatableEditor(spec, value) {
         const original = fieldsByKey.get(key);
         if (!original) continue;
         const field = { ...original, ...step.field_overrides?.[key] };
-        container.appendChild(makeRepeatableControl(field, makeItemInput(item, field)));
+        const box = makeRepeatableControl(field, makeItemInput(item, field));
+        if (field.visible_if) {
+          const refresh = () => { box.hidden = !repeatableFieldVisible(field, item); };
+          refresh();
+          visibilityRefreshers.push(refresh);
+        }
+        container.appendChild(box);
       }
     }
     card.appendChild(grid);
@@ -1294,6 +1336,7 @@ function makeRepeatableEditor(spec, value) {
 
   function render() {
     dependencyRefreshers = [];
+    visibilityRefreshers = [];
     const step = steps[activeStepIndex];
     reviewNotice.dataset.sourceFields = JSON.stringify(step.review_source_fields || []);
     updateCollectionReviewNotice(reviewNotice);
@@ -1367,7 +1410,7 @@ function collectionHasRevisions(key) {
 function updateCollectionReviewNotice(notice) {
   const keys = JSON.parse(notice.dataset.sourceFields || "[]").filter(collectionHasRevisions);
   const labels = keys.map((key) => fieldSpecFor(key).label || key);
-  notice.textContent = labels.length ? `${labels.join("、")}已发生修订，请检查“判断所依据的案件材料”是否需要更新。` : "";
+  notice.textContent = labels.length ? `${labels.join("、")}已发生修订，请检查相关标注是否需要更新。` : "";
   notice.classList.toggle("hidden", !keys.length);
 }
 
@@ -1433,7 +1476,7 @@ function makeCollectionEditor(spec, value) {
       if (editableFields.length) actions.appendChild(button("修正", key, () => {
         editingKey = key;
         openKeys.add(key);
-        store.dataset.validationError = "请先应用或取消正在进行的证据修正";
+        store.dataset.validationError = "请先应用或取消正在进行的条目修正";
         render();
         content.querySelector(".collectionEditInput")?.focus();
       }));
@@ -1466,7 +1509,7 @@ function makeCollectionEditor(spec, value) {
         error.setAttribute("role", "alert");
         const apply = button("应用修改", key, () => {
           if (inputs.some(({ input }) => !input.value.trim())) {
-            error.textContent = "内容不能为空；如不需要这份证据，请取消后删除。";
+            error.textContent = "内容不能为空；如不需要此条目，请取消后删除。";
             return;
           }
           inputs.forEach(({ field, input }) => setByPath(item, field.key, input.value));
@@ -1514,7 +1557,7 @@ function makeCollectionEditor(spec, value) {
       const archive = document.createElement("details");
       archive.className = "collectionDeleted";
       const summary = document.createElement("summary");
-      summary.textContent = `已删除证据（${deleted.length}）`;
+      summary.textContent = `已删除条目（${deleted.length}）`;
       archive.appendChild(summary);
       for (const key of deleted) {
         const row = document.createElement("div");
@@ -2696,7 +2739,7 @@ function renderRepeatableConfigDialog() {
         }, { wide: true, rows: 5 }),
         repeatableTextControl("动态选项数据路径", field.options_from_path, (value) => {
           if (value.trim()) field.options_from_path = value.trim(); else delete field.options_from_path;
-        }, { placeholder: "例如 laws" }),
+        }, { placeholder: "例如 candidates" }),
         repeatableSelectControl("对象选项模式", field.options_from_object || "keys", [["keys", "仅使用 key"], ["entries", "key + value 完整内容"]], (value) => {
           field.options_from_object = value;
           renderRepeatableConfigDialog();

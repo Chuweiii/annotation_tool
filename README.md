@@ -85,6 +85,8 @@ Flask app 的 import path 是 `server:app`。单 worker 是有意设置：会话
 - `cascader`：把内嵌的完整路径逐级展示为多个下拉选择
 - `checkbox_group`：以复选框组展示静态或动态选项，选项较多时支持搜索过滤
 - `self_multiselect`：引用同一组的其他子项，可配置 `acyclic=true` 检查循环关系
+- `text_list`：逐条新增、编辑和删除文本，默认保存为字符串数组；配置 `source_options` 后，每条显示来源选择和正文，保存为 `{ "source": "选定来源", "content": "正文" }`。来源选项由模版提供，旧字符串条目保留正文且不自动指定来源
+- 子字段可配置 `visible_if: { "field": "status", "equals": "pending" }`，根据同一子项内另一个字段的值显示；使用严格相等比较，隐藏时保留已填值并跳过该字段的必填提示
 - `options`：模版内静态选项
 - `options_from_path`：从当前数据行的数组或对象动态生成选项；对象默认取 key，配置 `options_from_object: "entries"` 后会展示并保存“key + value”完整内容
 - `options_source`：从项目内逐行文本、JSON 数组或编号缩进树加载选项

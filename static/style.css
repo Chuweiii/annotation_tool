@@ -423,6 +423,8 @@ input.chk{
 .repeatableTextListRow{padding:10px 12px 12px;border:1px solid var(--border-light);border-radius:10px;background:var(--panel2)}
 .repeatableTextListHead{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:12px;color:var(--muted)}
 .repeatableTextListRow textarea{display:block;min-width:0;background:#fff;min-height:76px}
+.repeatableTextListSourceBody{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;align-items:start}
+.repeatableTextListSourceBody select{min-width:0}
 .repeatableTextListRemove{padding:3px 6px;border:0;background:transparent;box-shadow:none;color:var(--muted);font-size:12px}
 .repeatableTextListRemove:hover{color:#be123c;background:rgba(225,29,72,.06)}
 .repeatableTextListAdd{align-self:flex-start;padding:7px 12px;color:#4338ca;border:1px dashed rgba(91,75,255,.35);background:rgba(91,75,255,.035);font-size:12px}
@@ -439,6 +441,7 @@ input.chk{
 .repeatableDependencyResultContent.empty{color:var(--muted)}
 .repeatableDependencyEmpty{padding:14px;border:1px dashed var(--border);border-radius:8px;font-size:12px;color:var(--muted)}
 .repeatableControl{display:flex;flex-direction:column;gap:6px;min-width:0}
+.repeatableControl[hidden]{display:none}
 .repeatableControl.wide{grid-column:1 / -1}
 .repeatableControlLabel{font-size:13px;font-weight:600;color:var(--text)}
 .repeatableControlLabel small{margin-left:8px;color:var(--muted);font-weight:400}
@@ -717,6 +720,7 @@ input.chk{
 @media (max-width: 720px){
   .fieldGroup{grid-template-columns:1fr !important}
   .repeatableCardGrid{grid-template-columns:1fr}
+  .repeatableTextListSourceBody{grid-template-columns:1fr}
   .repeatableCardSection{grid-template-columns:1fr}
   .repeatableControl.wide{grid-column:auto}
   .repeatableCardHead{align-items:flex-start;flex-direction:column}
