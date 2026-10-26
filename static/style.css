@@ -736,4 +736,3 @@ input.chk{
 .numberedTextSegment + .numberedTextSegment{margin-top:.8em}
 .segmentDisplaySetting{display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;margin-top:4px}
 .segmentDisplaySetting input{width:auto}
-.segmentDisplayToggle{font-size:11px;padding:3px 7px}

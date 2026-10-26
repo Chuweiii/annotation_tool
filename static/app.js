@@ -137,7 +137,6 @@ function captureRecordView() {
       baselineValue: input?.dataset.renderedValue, baselineChecked: input?.dataset.renderedChecked,
       dirty: input && (input.value !== input.dataset.renderedValue ||
         (input.dataset.widget === 'checkbox' && String(input.checked) !== input.dataset.renderedChecked)),
-      segmentEditing: Boolean(field.querySelector('.segmentedText') && !input.classList.contains('hidden')),
       details: [...field.querySelectorAll('details')].map(el => el.open),
       sizes: [...field.querySelectorAll('textarea')].map(el => ({ height: el.style.height, width: el.style.width })),
       editor: field.querySelector('.repeatableEditor, .collectionEditor')?.captureViewState?.(),
@@ -163,14 +162,6 @@ function restoreRecordView(view) {
     }
     field.querySelectorAll('details').forEach((el, i) => { if (saved.details[i] !== undefined) el.open = saved.details[i]; });
     field.querySelectorAll('textarea').forEach((el, i) => Object.assign(el.style, saved.sizes[i] || {}));
-    const preview = field.querySelector('.segmentedText');
-    if (preview && input) {
-      renderSegmentedText(preview, input.value);
-      input.classList.toggle('hidden', !saved.segmentEditing);
-      preview.classList.toggle('hidden', saved.segmentEditing);
-      const toggle = field.querySelector('.segmentDisplayToggle');
-      if (toggle) toggle.textContent = saved.segmentEditing ? '分段预览' : '编辑原文';
-    }
   }
   ['sourceFieldsContainer', 'fieldsContainer'].forEach((id, i) => { if ($(id)) $(id).scrollTop = view.scroll[i]; });
 }
@@ -421,7 +412,7 @@ function numberedTextSegments(text) {
       if ('“‘「『'.includes(text[scanned])) quoteDepth += 1;
       else if ('”’」』'.includes(text[scanned])) quoteDepth = Math.max(0, quoteDepth - 1);
     }
-    if (quoteDepth || !/(?:^|[\n\r；;。！？!?])[ \t\u3000]*$/u.test(text.slice(0, match.index))) continue;
+    if (quoteDepth || !/(?:^|[\n\r：:；;。！？!?])[ \t\u3000]*$/u.test(text.slice(0, match.index))) continue;
     const marker = match[0];
     if (marker.endsWith('.') && /\d/.test(text[match.index + marker.length] || '')) continue;
     const circled = '①②③④⑤⑥⑦⑧⑨⑩'.indexOf(marker);
@@ -431,16 +422,25 @@ function numberedTextSegments(text) {
     if (!groups.has(style)) groups.set(style, []);
     groups.get(style).push({ number, index: match.index });
   }
-  let best = [];
+  const lists = [];
   for (const markers of groups.values()) {
+    const runs = [];
     let run = [];
     for (const marker of markers) {
-      run = run.length && marker.number === run.at(-1).number + 1 ? [...run, marker] : [marker];
-      if (run.length > best.length) best = run;
+      if (run.length && marker.number !== run.at(-1).number + 1) {
+        if (run.length >= 2) runs.push(run);
+        run = [];
+      }
+      run.push(marker);
     }
+    if (run.length >= 2) runs.push(run);
+    if (runs.length) lists.push(runs.flat());
   }
-  if (best.length < 2) return [text];
-  const starts = [0, ...best.map(marker => marker.index).filter(index => index > 0)];
+  if (!lists.length) return [text];
+  // The first confirmed list establishes the outer style. Include subsequent
+  // lists of that style as well, even if their numbering starts again at one.
+  const outer = lists.reduce((first, list) => list[0].index < first[0].index ? list : first);
+  const starts = [0, ...outer.map(marker => marker.index).filter(index => index > 0)];
   return starts.map((start, i) => text.slice(start, starts[i + 1] ?? text.length));
 }
 
@@ -1733,7 +1733,7 @@ function makeCollectionCards(spec, value) {
       const content = document.createElement("div");
       content.className = "collectionCardFieldValue";
       const text = typeof fieldValue === 'string' ? fieldValue : JSON.stringify(fieldValue, null, 2);
-      if ((field.segment_display ?? spec.segment_display) && typeof fieldValue === 'string') renderSegmentedText(content, text);
+      if ((field.segment_display ?? spec.segment_display) && !field.editable && typeof fieldValue === 'string') renderSegmentedText(content, text);
       else content.textContent = text;
       block.append(label, content);
       body.appendChild(block);
@@ -1853,28 +1853,12 @@ function makeFieldEditor(spec, value) {
   input.addEventListener("input", scheduleAutoSave);
   input.addEventListener("change", scheduleAutoSave);
   let display = input;
-  if (spec.segment_display && ['text', 'textarea'].includes(w)) {
-    const preview = document.createElement('div');
-    preview.className = 'segmentedText';
-    renderSegmentedText(preview, input.value);
-    if (spec.editable) {
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'segmentDisplayToggle';
-      toggle.textContent = '编辑原文';
-      toggle.addEventListener('click', () => {
-        const editing = input.classList.contains('hidden');
-        input.classList.toggle('hidden', !editing);
-        preview.classList.toggle('hidden', editing);
-        toggle.textContent = editing ? '分段预览' : '编辑原文';
-        if (editing) input.focus();
-      });
-      headRight.appendChild(toggle);
-      input.addEventListener('input', () => renderSegmentedText(preview, input.value));
-    }
-    input.classList.add('hidden');
+  if (spec.segment_display && spec.editable === false && ['text', 'textarea'].includes(w)) {
+    // Read-only text needs a single display, not a hidden copy of a textarea.
+    // This also avoids CSS and saved view state accidentally exposing both.
     display = document.createElement('div');
-    display.append(input, preview);
+    display.className = 'segmentedText';
+    renderSegmentedText(display, input.value);
   }
   if (spec.collapsible) {
     const details = document.createElement("details");
@@ -3230,7 +3214,10 @@ function makeTplFieldRow(f, i) {
   const editable = document.createElement("input");
   editable.type = "checkbox";
   editable.checked = f.editable !== false;
-  editable.addEventListener("change", () => { f.editable = editable.checked; });
+  editable.addEventListener("change", () => {
+    f.editable = editable.checked;
+    segmentCheck.disabled = !canSegment();
+  });
 
   const panel = document.createElement("select");
   panel.className = "tplPanelSelect";
@@ -3269,13 +3256,15 @@ function makeTplFieldRow(f, i) {
   const segmentation = document.createElement('label');
   segmentation.className = 'segmentDisplaySetting';
   const segmentCheck = document.createElement('input');
+  const canSegment = () => f.widget === 'collection_cards' ||
+    (f.editable === false && ['text', 'textarea'].includes(f.widget));
   segmentCheck.type = 'checkbox';
   segmentCheck.checked = Boolean(f.segment_display);
-  segmentCheck.disabled = !['text', 'textarea', 'collection_cards'].includes(f.widget);
+  segmentCheck.disabled = !canSegment();
   segmentCheck.addEventListener('change', () => { f.segment_display = segmentCheck.checked; });
   const segmentLabel = document.createElement('span');
   segmentLabel.textContent = '编号分段';
-  segmentation.title = '仅分段展示连续编号的文本，不改变原文、保存值或导出格式；卡片集合应用于其文本子字段';
+  segmentation.title = '仅用于只读文本；卡片集合仅应用于不可修改的文本子字段。不改变原文、保存值或导出格式';
   segmentation.append(segmentCheck, segmentLabel);
   // Keep the existing template grid columns: group the display option with hint.
   const hintSettings = document.createElement('div');
