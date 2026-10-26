@@ -28,6 +28,9 @@ const state = {
   lastInputAt: 0,         // 最近一次输入时间（用于空闲判定）
   inferConfigs: null,     // /api/infer/config 返回的各模式默认配置
   repeatableSteps: {},
+  rowViews: {},
+  saveQueue: Promise.resolve(),
+  navigationQueue: Promise.resolve(),
 };
 
 const SIDEBAR_COLLAPSED_KEY = "annotation_sidebar_collapsed_v1";
@@ -106,19 +109,84 @@ function toast(msg, kind = "ok", ms = 2000) {
 }
 
 async function apiGet(url) {
-  const r = await fetch(url);
+  const r = await localWorkspace.request(url);
   if (!r.ok) throw new Error(await r.text());
   return r.json();
 }
 
 async function apiJson(method, url, body) {
-  const r = await fetch(url, {
+  const r = await localWorkspace.request(url, {
     method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body ?? {}),
   });
   if (!r.ok) throw new Error(await r.text());
-  return r.json();
+  const payload = await r.json();
+  if (url.startsWith('/api/template') && localWorkspace.snapshot) await localWorkspace.loadSnapshot();
+  return payload;
+}
+
+// Keep raw input (including temporarily invalid JSON) apart from confirmed
+// rows. Recovery must never silently commit an unfinished card revision.
+function captureRecordView() {
+  const fields = {};
+  for (const field of document.querySelectorAll('#fieldsContainer .field, #sourceFieldsContainer .field')) {
+    const input = field.querySelector('.fieldInput');
+    fields[field.dataset.key] = {
+      value: input?.value, checked: input?.checked,
+      baselineValue: input?.dataset.renderedValue, baselineChecked: input?.dataset.renderedChecked,
+      dirty: input && (input.value !== input.dataset.renderedValue ||
+        (input.dataset.widget === 'checkbox' && String(input.checked) !== input.dataset.renderedChecked)),
+      segmentEditing: Boolean(field.querySelector('.segmentedText') && !input.classList.contains('hidden')),
+      details: [...field.querySelectorAll('details')].map(el => el.open),
+      sizes: [...field.querySelectorAll('textarea')].map(el => ({ height: el.style.height, width: el.style.width })),
+      editor: field.querySelector('.repeatableEditor, .collectionEditor')?.captureViewState?.(),
+    };
+  }
+  return {
+    fields, deletedKeys: [...state.deletedKeys], extraKeys: [...state.extraKeys],
+    repeatableSteps: { ...state.repeatableSteps },
+    scroll: ['sourceFieldsContainer', 'fieldsContainer'].map(id => $(id)?.scrollTop || 0),
+  };
+}
+
+function restoreRecordView(view) {
+  if (!view) return;
+  for (const field of document.querySelectorAll('#fieldsContainer .field, #sourceFieldsContainer .field')) {
+    const saved = view.fields[field.dataset.key];
+    if (!saved) continue;
+    field.querySelector('.repeatableEditor, .collectionEditor')?.restoreViewState?.(saved.editor);
+    const input = field.querySelector('.fieldInput');
+    if (input && saved.dirty && saved.value !== undefined) {
+      input.value = saved.value;
+      if (saved.checked !== undefined) input.checked = saved.checked;
+    }
+    field.querySelectorAll('details').forEach((el, i) => { if (saved.details[i] !== undefined) el.open = saved.details[i]; });
+    field.querySelectorAll('textarea').forEach((el, i) => Object.assign(el.style, saved.sizes[i] || {}));
+    const preview = field.querySelector('.segmentedText');
+    if (preview && input) {
+      renderSegmentedText(preview, input.value);
+      input.classList.toggle('hidden', !saved.segmentEditing);
+      preview.classList.toggle('hidden', saved.segmentEditing);
+      const toggle = field.querySelector('.segmentDisplayToggle');
+      if (toggle) toggle.textContent = saved.segmentEditing ? '分段预览' : '编辑原文';
+    }
+  }
+  ['sourceFieldsContainer', 'fieldsContainer'].forEach((id, i) => { if ($(id)) $(id).scrollTop = view.scroll[i]; });
+}
+
+function checkpointWorkspace() {
+  if (state.rendering) return;
+  localWorkspace.checkpoint();
+}
+
+function captureWorkspaceView() {
+  if (state.selectedIndex !== null) state.rowViews[state.selectedIndex] = captureRecordView();
+  return {
+    selectedIndex: state.selectedIndex, rowViews: state.rowViews,
+    q: state.q, offset: state.offset, limit: state.limit,
+    filterChanged: state.filterChanged, dataFilters: state.dataFilters,
+  };
 }
 
 function isSidebarCollapsed() {
@@ -150,43 +218,6 @@ async function refreshMeta() {
   if ($("tplPathHint")) {
     $("tplPathHint").textContent = `当前模版文件：${m.template_path}（可随代码/数据一起归档，实现复现）`;
   }
-}
-
-async function chooseSession() {
-  const info = await apiGet("/api/resume-options");
-  if (!info.versions.length) {
-    await apiJson("POST", "/api/session/select", { action: "restart" });
-    return;
-  }
-
-  const choices = info.versions.map((v, i) => {
-    const savedAt = new Date(v.modified_at_ms).toLocaleString();
-    return `${i + 1}. ${v.name}（${savedAt}）`;
-  });
-  const message = [
-    `检测到 ${info.source_path} 的历史标注存档：`,
-    "",
-    "0. 重新开始",
-    ...choices,
-    "",
-    "请输入编号；取消也将重新开始。",
-  ].join("\n");
-  const answer = window.prompt(message, "1");
-  const index = answer === null ? 0 : Number.parseInt(answer.trim(), 10);
-
-  if (index === 0) {
-    await apiJson("POST", "/api/session/select", { action: "restart" });
-    return;
-  }
-  if (Number.isInteger(index) && index >= 1 && index <= info.versions.length) {
-    await apiJson("POST", "/api/session/select", {
-      action: "resume",
-      name: info.versions[index - 1].name,
-    });
-    return;
-  }
-  window.alert("编号无效，请重新选择。");
-  return chooseSession();
 }
 
 function buildRowsUrl() {
@@ -365,9 +396,62 @@ function fieldSpecFor(key) {
 
 function valueToWidgetText(v, widget) {
   if (v === null || v === undefined) return "";
-  if (widget === "json") return typeof v === "string" ? v : JSON.stringify(v, null, 2);
+  if (widget === "json") return JSON.stringify(v, null, 2);
   if (typeof v === "string") return v;
   return JSON.stringify(v);
+}
+
+function numberedTextSegments(text) {
+  // Only split consecutive markers of the same style at paragraph/sentence
+  // boundaries. All slices retain the exact original characters.
+  const pattern = /[一二三四五六七八九十百零〇两]+、|[（(][一二三四五六七八九十百零〇两]+[）)]|\d+[、.]|[（(]\d+[）)]|[①②③④⑤⑥⑦⑧⑨⑩]/gu;
+  const chineseNumber = (value) => {
+    const digits = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    let total = 0, digit = 0;
+    for (const char of value) {
+      if (char === '十' || char === '百') { total += (digit || 1) * (char === '十' ? 10 : 100); digit = 0; }
+      else digit = digits[char];
+    }
+    return total + digit;
+  };
+  const groups = new Map();
+  let quoteDepth = 0, scanned = 0;
+  for (const match of text.matchAll(pattern)) {
+    for (; scanned < match.index; scanned += 1) {
+      if ('“‘「『'.includes(text[scanned])) quoteDepth += 1;
+      else if ('”’」』'.includes(text[scanned])) quoteDepth = Math.max(0, quoteDepth - 1);
+    }
+    if (quoteDepth || !/(?:^|[\n\r；;。！？!?])[ \t\u3000]*$/u.test(text.slice(0, match.index))) continue;
+    const marker = match[0];
+    if (marker.endsWith('.') && /\d/.test(text[match.index + marker.length] || '')) continue;
+    const circled = '①②③④⑤⑥⑦⑧⑨⑩'.indexOf(marker);
+    const numberText = marker.replace(/[（()）、.]/g, '');
+    const number = circled >= 0 ? circled + 1 : /^\d+$/.test(numberText) ? Number(numberText) : chineseNumber(numberText);
+    const style = circled >= 0 ? 'circle' : `${/^\d+$/.test(numberText) ? 'digit' : 'chinese'}-${marker.replace(numberText, '#')}`;
+    if (!groups.has(style)) groups.set(style, []);
+    groups.get(style).push({ number, index: match.index });
+  }
+  let best = [];
+  for (const markers of groups.values()) {
+    let run = [];
+    for (const marker of markers) {
+      run = run.length && marker.number === run.at(-1).number + 1 ? [...run, marker] : [marker];
+      if (run.length > best.length) best = run;
+    }
+  }
+  if (best.length < 2) return [text];
+  const starts = [0, ...best.map(marker => marker.index).filter(index => index > 0)];
+  return starts.map((start, i) => text.slice(start, starts[i + 1] ?? text.length));
+}
+
+function renderSegmentedText(container, text) {
+  container.replaceChildren();
+  for (const part of numberedTextSegments(text)) {
+    const paragraph = document.createElement('div');
+    paragraph.className = 'numberedTextSegment';
+    paragraph.textContent = part;
+    container.appendChild(paragraph);
+  }
 }
 
 function repeatableFieldVisible(field, item) {
@@ -1394,6 +1478,18 @@ function makeRepeatableEditor(spec, value) {
     render();
     cards.lastElementChild?.scrollIntoView({ behavior: "smooth", block: "start" });
   });
+  editor.captureViewState = () => ({
+    collapsed: [...collapsedItemIds], positions: [...graphPositions], selected: graphSelectedId,
+  });
+  editor.restoreViewState = (view) => {
+    if (!view) return;
+    collapsedItemIds.clear();
+    view.collapsed.forEach(id => collapsedItemIds.add(id));
+    graphPositions.clear();
+    view.positions.forEach(([id, position]) => graphPositions.set(id, position));
+    graphSelectedId = view.selected;
+    render();
+  };
   render();
   return editor;
 }
@@ -1577,6 +1673,19 @@ function makeCollectionEditor(spec, value) {
       content.appendChild(archive);
     }
   }
+  editor.captureViewState = () => ({
+    openKeys: [...openKeys], editingKey,
+    draft: [...content.querySelectorAll('.collectionEditInput')].map(input => input.value),
+  });
+  editor.restoreViewState = (view) => {
+    if (!view) return;
+    openKeys.clear();
+    view.openKeys.forEach(key => openKeys.add(key));
+    editingKey = view.editingKey;
+    if (editingKey !== null) store.dataset.validationError = '请先应用或取消正在进行的条目修正';
+    render();
+    content.querySelectorAll('.collectionEditInput').forEach((input, i) => { input.value = view.draft[i] ?? input.value; });
+  };
   render();
   return editor;
 }
@@ -1623,9 +1732,9 @@ function makeCollectionCards(spec, value) {
       label.textContent = field.label || field.key;
       const content = document.createElement("div");
       content.className = "collectionCardFieldValue";
-      content.textContent = typeof fieldValue === "string"
-        ? fieldValue
-        : JSON.stringify(fieldValue, null, 2);
+      const text = typeof fieldValue === 'string' ? fieldValue : JSON.stringify(fieldValue, null, 2);
+      if ((field.segment_display ?? spec.segment_display) && typeof fieldValue === 'string') renderSegmentedText(content, text);
+      else content.textContent = text;
       block.append(label, content);
       body.appendChild(block);
     }
@@ -1743,6 +1852,30 @@ function makeFieldEditor(spec, value) {
   if (!spec.editable) input.disabled = true;
   input.addEventListener("input", scheduleAutoSave);
   input.addEventListener("change", scheduleAutoSave);
+  let display = input;
+  if (spec.segment_display && ['text', 'textarea'].includes(w)) {
+    const preview = document.createElement('div');
+    preview.className = 'segmentedText';
+    renderSegmentedText(preview, input.value);
+    if (spec.editable) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'segmentDisplayToggle';
+      toggle.textContent = '编辑原文';
+      toggle.addEventListener('click', () => {
+        const editing = input.classList.contains('hidden');
+        input.classList.toggle('hidden', !editing);
+        preview.classList.toggle('hidden', editing);
+        toggle.textContent = editing ? '分段预览' : '编辑原文';
+        if (editing) input.focus();
+      });
+      headRight.appendChild(toggle);
+      input.addEventListener('input', () => renderSegmentedText(preview, input.value));
+    }
+    input.classList.add('hidden');
+    display = document.createElement('div');
+    display.append(input, preview);
+  }
   if (spec.collapsible) {
     const details = document.createElement("details");
     details.className = "sourceDetails";
@@ -1752,10 +1885,10 @@ function makeFieldEditor(spec, value) {
     details.addEventListener("toggle", () => {
       summary.textContent = details.open ? "收起内容" : "展开内容";
     });
-    details.append(summary, input);
+    details.append(summary, display);
     wrap.appendChild(details);
   } else {
-    wrap.appendChild(input);
+    wrap.appendChild(display);
   }
   return wrap;
 }
@@ -1774,7 +1907,17 @@ function makeUndoBtn(key, wrap) {
 }
 
 function makeRenderedFieldEditor(spec) {
-  const el = makeFieldEditor(spec, getByPath(state.currentRow, spec.key));
+  let value = getByPath(state.currentRow, spec.key);
+  const saved = state.renderingView?.fields[spec.key];
+  if (saved?.dirty && saved.value !== undefined && ['repeatable', 'collection_cards'].includes(spec.widget)) {
+    try { value = JSON.parse(saved.value); } catch {}
+  }
+  const el = makeFieldEditor(spec, value);
+  const input = el.querySelector('.fieldInput');
+  if (input) {
+    input.dataset.renderedValue = saved?.dirty ? saved.baselineValue : input.value;
+    input.dataset.renderedChecked = saved?.dirty ? saved.baselineChecked : String(input.checked);
+  }
   if (state.deletedKeys.has(spec.key)) {
     el.classList.add("deleted");
     const btn = el.querySelector(".fieldDelBtn");
@@ -1808,9 +1951,11 @@ function renderFieldSpecs(container, specs) {
   }
 }
 
-function renderDetail() {
+function renderDetail(view = captureRecordView()) {
   const row = state.currentRow;
   if (row === null) return;
+  state.renderingView = view;
+  state.rendering = true;
   const sourceContainer = $("sourceFieldsContainer");
   const annotationContainer = $("fieldsContainer");
   sourceContainer.innerHTML = "";
@@ -1856,6 +2001,10 @@ function renderDetail() {
   );
 
   renderLabelledTag();
+  restoreRecordView(view);
+  state.renderingView = null;
+  state.rendering = false;
+  checkpointWorkspace();
 }
 
 function renderLabelledTag() {
@@ -1870,7 +2019,13 @@ function renderLabelledTag() {
   tag.textContent = on ? "已标注" : "未标注";
 }
 
-async function toggleLabelled() {
+function toggleLabelled() {
+  const task = state.saveQueue.catch(() => {}).then(performToggleLabelled);
+  state.saveQueue = task;
+  return task;
+}
+
+async function performToggleLabelled() {
   if (state.selectedIndex === null) return;
   const next = !state.currentRow[LABELLED_FIELD];
   try {
@@ -1878,6 +2033,8 @@ async function toggleLabelled() {
       set: { [LABELLED_FIELD]: next },
     });
     state.currentRow[LABELLED_FIELD] = next;
+    if (localWorkspace.snapshot) localWorkspace.snapshot.rows[state.selectedIndex][LABELLED_FIELD] = next;
+    checkpointWorkspace();
     renderLabelledTag();
     toast(next ? "已标记为已标注" : "已标记为未标注");
     await refreshMeta();
@@ -1896,26 +2053,45 @@ function updateRowNav() {
   $("rowNavPos").textContent = `#${state.selectedIndex + 1} / ${state.datasetTotal}`;
 }
 
-async function selectRow(index) {
-  if (state.selectedIndex !== null) {
-    if (index === state.selectedIndex) return;
-    if (!await applyCurrent({ silent: true, navigating: true })) return;
-  }
-  state.selectedIndex = index;
-  state.repeatableSteps = {};
-  state.deletedKeys = new Set();
-  state.extraKeys = [];
-  await refreshList();
+function selectRow(index) {
+  if (state.uploading) return Promise.resolve();
+  const task = state.navigationQueue.catch(() => {}).then(() => performSelectRow(index));
+  state.navigationQueue = task;
+  return task;
+}
 
-  const d = await apiGet(`/api/row/${index}`);
-  state.currentRow = d.row;
-  $("detailEmpty").classList.add("hidden");
-  $("detail").classList.remove("hidden");
-  $("detailTitle").textContent = `标注工作区 — #${index + 1}`;
-  $("applyMsg").textContent = "";
-  showAnnotateView();
-  renderDetail();
-  updateRowNav();
+async function performSelectRow(index) {
+  if (index === state.selectedIndex) return;
+  const detail = $('detail');
+  const wasInert = detail?.inert;
+  if (detail) detail.inert = true;
+  state.navigating = true;
+  try {
+    if (state.selectedIndex !== null) {
+      if (!await applyCurrent({ silent: true, navigating: true })) return;
+      state.rowViews[state.selectedIndex] = captureRecordView();
+    }
+    // Fetch before changing the selected index. A slow/failing request must not
+    // leave the previous record's form associated with a different row index.
+    const d = await apiGet(`/api/row/${index}`);
+    const view = state.rowViews[index];
+    state.selectedIndex = index;
+    state.repeatableSteps = view?.repeatableSteps || {};
+    state.deletedKeys = new Set(view?.deletedKeys || []);
+    state.extraKeys = view?.extraKeys || [];
+    state.currentRow = d.row;
+    $("detailEmpty").classList.add("hidden");
+    $("detail").classList.remove("hidden");
+    $("detailTitle").textContent = `标注工作区 — #${index + 1}`;
+    $("applyMsg").textContent = "";
+    showAnnotateView();
+    renderDetail(view || null);
+    updateRowNav();
+    await refreshList();
+  } finally {
+    state.navigating = false;
+    if (detail) detail.inert = wasInert;
+  }
 }
 
 async function gotoRow(delta) {
@@ -1981,9 +2157,19 @@ function collectChanges() {
   return { sets, deletes, errors };
 }
 
-async function applyCurrent({ silent = false, navigating = false } = {}) {
+function applyCurrent(options = {}) {
+  const task = state.saveQueue.catch(() => {}).then(() => performApplyCurrent(options));
+  state.saveQueue = task;
+  return task;
+}
+
+async function performApplyCurrent({ silent = false, navigating = false } = {}) {
+  if (state.uploading) return false;
+  if (state.navigating && !navigating) return false;
   if (state.selectedIndex === null) return true;
   const { sets, deletes, errors } = collectChanges();
+  const submitted = new Map([...document.querySelectorAll('.fieldInput')].map(input =>
+    [input.dataset.key, { value: input.value, checked: String(input.checked) }]));
   if (errors.length) {
     $("applyMsg").textContent = "有错误：" + errors.join("；");
     if (!silent) toast("保存失败：" + errors[0], "err", 3000);
@@ -2000,26 +2186,34 @@ async function applyCurrent({ silent = false, navigating = false } = {}) {
     });
     // 同步本地数据
     for (const [k, v] of Object.entries(sets)) setByPath(state.currentRow, k, v);
+    for (const input of document.querySelectorAll('.fieldInput')) {
+      if (!Object.hasOwn(sets, input.dataset.key)) continue;
+      input.dataset.renderedValue = submitted.get(input.dataset.key).value;
+      input.dataset.renderedChecked = submitted.get(input.dataset.key).checked;
+    }
     for (const [k, v] of Object.entries(r.collection_backups || {})) setByPath(state.currentRow, k, v);
     for (const k of deletes) deleteByPath(state.currentRow, k);
-    const hadDeletes = deletes.length > 0;
-    state.deletedKeys = new Set();
+    for (const key of deletes) {
+      if (!state.deletedKeys.has(key)) continue;
+      state.deletedKeys.delete(key);
+      for (const field of document.querySelectorAll('#fieldsContainer .field, #sourceFieldsContainer .field')) {
+        if (field.dataset.key === key) field.remove();
+      }
+    }
     state.extraKeys = state.extraKeys.filter((k) => hasByPath(state.currentRow, k));
     if (r.item) state.currentRow[LABELLED_FIELD] = Boolean(r.item.dirty);
-    // 静默保存（自动保存）时不重建表单，避免打断正在输入的用户；
-    // 有字段删除、或即将切换条目时才重新渲染。
-    const typing = document.activeElement?.classList?.contains("fieldInput") ||
-      Boolean(document.activeElement?.closest?.(".repeatableEditor, .collectionEditor"));
-    if (!silent || hadDeletes || (!typing && !navigating)) {
-      renderDetail();
-    } else {
-      renderLabelledTag();
+    // Saving never rebuilds editors: preserve focus, drafts and presentation.
+    renderLabelledTag();
+    if (localWorkspace.snapshot) {
+      localWorkspace.snapshot.rows[state.selectedIndex] = structuredClone(state.currentRow);
+      checkpointWorkspace();
+      await localWorkspace.flush();
     }
     if (r.auto_saved_path) {
       $("applyMsg").textContent = `已保存并自动写入 ${r.auto_saved_path}`;
       if (!silent) toast("已保存并写盘");
     } else {
-      $("applyMsg").textContent = '已保存到内存（点击右上角"保存到文件"写盘）';
+      $("applyMsg").textContent = '已更新临时工作区；浏览器草稿独立保留，完成后请下载结果';
       if (!silent) toast("已保存此条");
     }
     await refreshMeta();
@@ -2035,6 +2229,7 @@ async function applyCurrent({ silent = false, navigating = false } = {}) {
 // 自动保存：在固定周期兜底之外，等待用户停止输入 AUTOSAVE_IDLE_MS 后再保存，
 // 避免每次按键都触发保存打断输入。
 function scheduleAutoSave() {
+  checkpointWorkspace();
   if (state.template?.save_mode !== "auto") return;
   state.lastInputAt = Date.now();
   window.clearTimeout(state.autoSaveTimer);
@@ -2042,6 +2237,7 @@ function scheduleAutoSave() {
 }
 
 function autoSaveIfIdle() {
+  if (state.navigating || state.uploading) return;
   if (state.template?.save_mode !== "auto") return;
   if (state.selectedIndex === null) return;
   if (document.querySelector(".collectionEditInput")) return;
@@ -2051,6 +2247,7 @@ function autoSaveIfIdle() {
 
 function startAutoSaveLoop() {
   window.setInterval(() => {
+    if (state.navigating || state.uploading) return;
     if (state.template?.save_mode !== "auto") return;
     if (state.selectedIndex === null) return;
     if (document.querySelector(".collectionEditInput")) return;
@@ -3069,6 +3266,21 @@ function makeTplFieldRow(f, i) {
   filterable.title = "在左侧列表中提供该字段的筛选控件";
   filterable.addEventListener("change", () => { f.filterable = filterable.checked; });
 
+  const segmentation = document.createElement('label');
+  segmentation.className = 'segmentDisplaySetting';
+  const segmentCheck = document.createElement('input');
+  segmentCheck.type = 'checkbox';
+  segmentCheck.checked = Boolean(f.segment_display);
+  segmentCheck.disabled = !['text', 'textarea', 'collection_cards'].includes(f.widget);
+  segmentCheck.addEventListener('change', () => { f.segment_display = segmentCheck.checked; });
+  const segmentLabel = document.createElement('span');
+  segmentLabel.textContent = '编号分段';
+  segmentation.title = '仅分段展示连续编号的文本，不改变原文、保存值或导出格式；卡片集合应用于其文本子字段';
+  segmentation.append(segmentCheck, segmentLabel);
+  // Keep the existing template grid columns: group the display option with hint.
+  const hintSettings = document.createElement('div');
+  hintSettings.append(hint, segmentation);
+
   const del = document.createElement("button");
   del.type = "button";
   del.className = "tplDelBtn";
@@ -3082,7 +3294,7 @@ function makeTplFieldRow(f, i) {
   row.appendChild(handle);
   row.appendChild(key);
   row.appendChild(label);
-  row.appendChild(hint);
+  row.appendChild(hintSettings);
   row.appendChild(widget);
   row.appendChild(rows);
   row.appendChild(options);
@@ -3212,10 +3424,11 @@ async function uploadTemplateFile(file) {
   form.append("file", file);
   $("tplUploadBtn").disabled = true;
   try {
-    const response = await fetch("/api/template/upload", { method: "POST", body: form });
+    const response = await localWorkspace.request("/api/template/upload", { method: "POST", body: form });
     const payload = await response.json().catch(async () => ({ error: await response.text() }));
     if (!response.ok) throw new Error(payload.error || "上传失败");
     state.template = payload.template;
+    if (localWorkspace.snapshot) await localWorkspace.loadSnapshot();
     state.tplDraft = JSON.parse(JSON.stringify(payload.template));
     state.dataFilters = {};
     renderTemplateEditor();
@@ -3261,15 +3474,31 @@ function wire() {
   $("uploadBtn").addEventListener("click", async () => {
     const file = $("datasetFile").files?.[0];
     if (!file) return toast("请先选择数据文件", "err");
-    const form = new FormData();
-    form.append("file", file);
     $("uploadBtn").disabled = true;
+    state.uploading = true;
+    const wasInert = $('shell').inert;
+    $('shell').inert = true;
     try {
-      const response = await fetch("/api/upload", { method: "POST", body: form });
-      if (!response.ok) throw new Error(await response.text());
-      window.location.reload();
+      await state.navigationQueue.catch(() => {});
+      await state.saveQueue.catch(() => {});
+      await localWorkspace.upload(file);
+      state.selectedIndex = null;
+      state.currentRow = null;
+      state.rowViews = {};
+      state.offset = 0;
+      state.q = '';
+      state.filterChanged = 'any';
+      state.dataFilters = {};
+      localWorkspace.capture = null;
+      $('detail').classList.add('hidden');
+      $('detailEmpty').classList.remove('hidden');
+      await loadWorkspaceUI();
+      toast('数据已上传；当前标签页独立标注');
     } catch (e) {
       toast("上传失败：" + (e?.message ?? String(e)), "err", 5000);
+    } finally {
+      state.uploading = false;
+      $('shell').inert = wasInert;
       $("uploadBtn").disabled = false;
     }
   });
@@ -3330,9 +3559,17 @@ function wire() {
 
   $("saveBtn").addEventListener("click", async () => {
     $("saveBtn").disabled = true;
+    // Freeze interaction only for the final export so it includes the latest
+    // navigation/save, with no new edits arriving between PATCH and download.
+    const controls = ['uploadBtn', 'templateBtn', 'saveModeSel'].map($);
+    const disabled = controls.map(control => control.disabled);
+    const wasInert = $('shell').inert;
+    $('shell').inert = true;
+    controls.forEach(control => { control.disabled = true; });
     try {
+      await state.navigationQueue.catch(() => {});
       if (!await applyCurrent({ silent: true })) return;
-      const response = await fetch("/api/save", { method: "POST" });
+      const response = await localWorkspace.request("/api/save", { method: "POST" });
       if (!response.ok) throw new Error(await response.text());
       const blob = await response.blob();
       const disposition = response.headers.get("Content-Disposition") || "";
@@ -3349,6 +3586,8 @@ function wire() {
     } catch (e) {
       toast("写入失败：" + (e?.message ?? String(e)), "err", 4000);
     } finally {
+      $('shell').inert = wasInert;
+      controls.forEach((control, i) => { control.disabled = disabled[i]; });
       $("saveBtn").disabled = false;
     }
   });
@@ -3399,20 +3638,50 @@ function wire() {
 }
 
 async function main() {
+  localWorkspace.onStatus = (message, error = false) => {
+    $("backupStatus").textContent = message;
+    $("backupStatus").classList.toggle('backupError', error);
+  };
+  await localWorkspace.initialize();
   wire();
+  for (const event of ['input', 'change', 'toggle', 'pointerup', 'click']) {
+    document.addEventListener(event, () => queueMicrotask(checkpointWorkspace), true);
+  }
+  document.addEventListener('scroll', checkpointWorkspace, true);
+  window.addEventListener('pagehide', () => { checkpointWorkspace(); localWorkspace.flush(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') { checkpointWorkspace(); localWorkspace.flush(); }
+  });
   let collapsed = false;
   try {
     collapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
   } catch {}
   setSidebarCollapsed(collapsed);
 
+  await loadWorkspaceUI();
+  startAutoSaveLoop();
+}
+
+async function loadWorkspaceUI() {
   const status = await apiGet("/api/status");
   if (!status.ready) {
-    $("metaLine").textContent = "请选择本地 JSON / JSONL / Excel 文件并点击“上传数据”";
-    toast("请先上传待标注文件", "ok", 4000);
-    return;
+    if (localWorkspace.snapshot) await localWorkspace.restore();
+    else {
+      $("metaLine").textContent = "请选择本地 JSON / JSONL / Excel 文件并点击“上传数据”";
+      toast("请先上传待标注文件", "ok", 4000);
+      return;
+    }
   }
-  await chooseSession();
+  if (!localWorkspace.snapshot) {
+    await localWorkspace.loadSnapshot();
+  }
+  const ui = localWorkspace.snapshot.ui;
+  if (ui) {
+    for (const key of ['rowViews', 'q', 'offset', 'limit', 'filterChanged', 'dataFilters']) state[key] = ui[key] ?? state[key];
+  }
+  $('q').value = state.q;
+  $('filterChanged').value = state.filterChanged;
+  $('pageSize').value = String(state.limit);
   state.template = await apiGet("/api/template");
   await refreshTemplateLibrary();
   await loadInferConfigs();
@@ -3420,7 +3689,10 @@ async function main() {
   updateInferVisibility();
   await refreshMeta();
   await refreshList();
-  startAutoSaveLoop();
+  localWorkspace.capture = captureWorkspaceView;
+  if (ui?.selectedIndex !== null && Number.isInteger(ui?.selectedIndex) && ui.selectedIndex < state.datasetTotal) {
+    await selectRow(ui.selectedIndex);
+  }
 }
 
 main().catch((e) => toast("初始化失败：" + (e?.message ?? String(e)), "err", 5000));

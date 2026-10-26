@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from flask import Flask, g, jsonify, request, send_file, send_from_directory, session
+from flask import Flask, Request, g, jsonify, request, send_file, send_from_directory, session
 from werkzeug.local import LocalProxy
 from werkzeug.utils import secure_filename
 
@@ -24,6 +24,16 @@ OUTPUT_DIR = APP_DIR / "output"
 TEMPLATE_DIR = APP_DIR / "annotation_templates"
 ALLOWED_SUFFIXES = {".json", ".jsonl", ".xlsx", ".xls"}
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+class AnnotationRequest(Request):
+    @property
+    def max_content_length(self):
+        limit = super().max_content_length
+        # Recovery contains both original and confirmed rows, encoded as JSON.
+        if self.path == "/api/workspace/restore" and limit is not None:
+            return limit * 4
+        return limit
 
 # 字段类型推断阈值
 ENUM_MAX_DISTINCT = 12       # 不同取值数 <= 该值 且为短字符串 -> select
@@ -712,6 +722,8 @@ def validate_template(tpl: Any) -> Optional[str]:
             return f"fields[{i}].hint 必须是字符串"
         if not isinstance(f.get("filterable", False), bool):
             return f"fields[{i}].filterable 必须是布尔值"
+        if not isinstance(f.get("segment_display", False), bool):
+            return f"fields[{i}].segment_display 必须是布尔值"
         if not isinstance(f.get("options", []), list):
             return f"fields[{i}].options 必须是数组"
         if f.get("widget") == "repeatable":
@@ -826,6 +838,8 @@ def validate_template(tpl: Any) -> Optional[str]:
                     return f"fields[{i}].card_fields[{j}] 必须包含字符串 key"
                 if not isinstance(card_field.get("editable", False), bool):
                     return f"fields[{i}].card_fields[{j}].editable 必须是布尔值"
+                if not isinstance(card_field.get("segment_display", False), bool):
+                    return f"fields[{i}].card_fields[{j}].segment_display 必须是布尔值"
     by_key = {f["key"]: f for f in fields}
     backup_fields = set()
     collection_keys = {f["key"] for f in fields if f.get("widget") == "collection_cards"}
@@ -991,14 +1005,27 @@ def validate_collection_revision(spec: Dict[str, Any], current: Any, original: A
 
 def make_app() -> Flask:
     app = Flask(__name__, static_folder="static", static_url_path="/static")
+    app.request_class = AnnotationRequest
     app.secret_key = os.environ.get("SECRET_KEY", "dev-only-secret-change-in-production")
     app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES
     workspaces: Dict[str, Dict[str, Any]] = {}
     workspace_lock = threading.RLock()
 
+    def requested_workspace_id():
+        # New clients isolate tabs. Keep the cookie fallback for older clients.
+        return request.headers.get("X-Workspace-ID", session.get("workspace_id"))
+
+    def owned_workspace():
+        state = workspaces.get(requested_workspace_id())
+        if state is not None and state.get("owner") == session.get("browser_id"):
+            return state
+        return None
+
     @app.before_request
     def lock_workspace_state():
-        state = workspaces.get(session.get("workspace_id"))
+        if "browser_id" not in session:
+            session["browser_id"] = uuid.uuid4().hex
+        state = owned_workspace()
         if state is not None:
             g.workspace_lock = state["lock"]
             g.workspace_lock.acquire()
@@ -1010,8 +1037,7 @@ def make_app() -> Flask:
             lock.release()
 
     def workspace(required: bool = True) -> Optional[Dict[str, Any]]:
-        workspace_id = session.get("workspace_id")
-        state = workspaces.get(workspace_id) if workspace_id else None
+        state = owned_workspace()
         if state is None and required:
             raise RuntimeError("请先上传待标注文件")
         return state
@@ -1126,8 +1152,14 @@ def make_app() -> Flask:
             return jsonify({"error": "仅支持 .json、.jsonl、.xlsx、.xls 文件"}), 400
         filename = f"{secure_filename(original.stem) or 'upload'}{suffix}"
 
-        workspace_id = uuid.uuid4().hex
+        workspace_id = request.headers.get("X-Workspace-ID") or uuid.uuid4().hex
+        if not re.fullmatch(r"[a-f0-9]{32}", workspace_id):
+            return jsonify({"error": "任务标识不合法"}), 400
+        if workspace_id in workspaces and owned_workspace() is None:
+            return jsonify({"error": "任务标识已被使用"}), 403
         root = Path(tempfile.gettempdir()) / "annotation-tool" / workspace_id
+        # A process restart can leave the directory behind on local deployments.
+        root = root / uuid.uuid4().hex
         root.mkdir(parents=True, exist_ok=False)
         source_path = root / filename
         uploaded.save(source_path)
@@ -1140,12 +1172,13 @@ def make_app() -> Flask:
                 "template_path": new_template_path,
                 "root": root,
                 "lock": threading.RLock(),
+                "owner": session["browser_id"],
             }
         except Exception as exc:
             shutil.rmtree(root, ignore_errors=True)
             return jsonify({"error": f"文件解析失败：{exc}"}), 400
 
-        old_id = session.get("workspace_id")
+        old_id = requested_workspace_id()
         with workspace_lock:
             old_state = workspaces.pop(old_id, None) if old_id else None
             workspaces[workspace_id] = sync_state
@@ -1153,6 +1186,82 @@ def make_app() -> Flask:
             shutil.rmtree(old_state["root"], ignore_errors=True)
         session["workspace_id"] = workspace_id
         return jsonify({"ok": True, "filename": filename, "rows": len(new_dataset.rows)})
+
+    @app.get("/api/workspace")
+    def workspace_snapshot():
+        return jsonify({
+            "filename": dataset.path.name,
+            "rows": dataset.rows,
+            "source_rows": load_data(dataset.path).rows,
+            "template": dict(template),
+            "templates": {
+                path.name: json.loads(path.read_text(encoding="utf-8"))
+                for path in workspace()["root"].glob("*.template.json")
+            },
+        })
+
+    @app.delete("/api/workspace")
+    def release_workspace():
+        state = workspace(required=False)
+        if state is None:
+            return jsonify({"error": "任务不存在或不属于当前浏览器"}), 404
+        with workspace_lock:
+            workspaces.pop(requested_workspace_id(), None)
+        shutil.rmtree(state["root"], ignore_errors=True)
+        return jsonify({"ok": True})
+
+    @app.post("/api/workspace/restore")
+    def restore_workspace():
+        """Rebuild a lost temporary workspace from this tab's local copy."""
+        workspace_id = request.headers.get("X-Workspace-ID", "")
+        if not re.fullmatch(r"[a-f0-9]{32}", workspace_id):
+            return jsonify({"error": "任务标识不合法"}), 400
+        with workspace_lock:
+            if workspace_id in workspaces:
+                if owned_workspace() is None:
+                    return jsonify({"error": "任务标识已被使用"}), 403
+                return jsonify({"ok": True})
+            body = request.get_json(silent=True) or {}
+            if not isinstance(body, dict):
+                return jsonify({"error": "恢复数据必须是对象"}), 400
+            rows, source_rows = body.get("rows"), body.get("source_rows")
+            tpl = body.get("template")
+            filename = body.get("filename", "")
+            if not isinstance(filename, str) or Path(filename).suffix.lower() not in ALLOWED_SUFFIXES:
+                return jsonify({"error": "恢复文件格式不合法"}), 400
+            for records in (rows, source_rows):
+                if not isinstance(records, list) or not all(isinstance(row, dict) for row in records):
+                    return jsonify({"error": "恢复数据必须是对象数组"}), 400
+            error = validate_template(tpl)
+            templates = body.get("templates", {})
+            if not isinstance(templates, dict):
+                return jsonify({"error": "恢复模版库不合法"}), 400
+            for name, item in templates.items():
+                if normalize_template_name(name) != name or validate_template(item):
+                    return jsonify({"error": "恢复模版库不合法"}), 400
+            if error:
+                return jsonify({"error": error}), 400
+            root = Path(tempfile.gettempdir()) / "annotation-tool" / workspace_id / uuid.uuid4().hex
+            root.mkdir(parents=True)
+            source_path = root / Path(filename).name
+            suffix = source_path.suffix.lower()
+            fmt = "excel" if suffix in EXCEL_SUFFIXES else "jsonl" if suffix == ".jsonl" else "json"
+            dirty_rows = init_label_state(rows)
+            restored = Dataset(source_path, fmt, deepcopy(rows), _now_ms(), dirty_rows)
+            try:
+                atomic_write_data(source_path, Dataset(source_path, fmt, source_rows, _now_ms()))
+                tpl_path = root / "restored.template.json"
+                save_template(tpl, tpl_path)
+                for name, item in templates.items():
+                    save_template(item, root / name)
+            except Exception:
+                shutil.rmtree(root, ignore_errors=True)
+                raise
+            workspaces[workspace_id] = {
+                "dataset": restored, "template": tpl, "template_path": tpl_path,
+                "root": root, "lock": threading.RLock(), "owner": session["browser_id"],
+            }
+        return jsonify({"ok": True})
 
     @app.get("/api/meta")
     def meta():

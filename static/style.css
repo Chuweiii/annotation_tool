@@ -730,3 +730,10 @@ input.chk{
   .repeatableConfigGrid{grid-template-columns:1fr}
   .repeatableConfigControl.wide{grid-column:auto}
 }
+
+.backupError{color:#b45309}
+.segmentedText{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.6;padding:10px;border:1px solid var(--border,#d8dee9);border-radius:8px;max-height:70vh;overflow:auto}
+.numberedTextSegment + .numberedTextSegment{margin-top:.8em}
+.segmentDisplaySetting{display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;margin-top:4px}
+.segmentDisplaySetting input{width:auto}
+.segmentDisplayToggle{font-size:11px;padding:3px 7px}
