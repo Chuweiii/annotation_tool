@@ -3637,7 +3637,7 @@ async function main() {
     document.addEventListener(event, () => queueMicrotask(checkpointWorkspace), true);
   }
   document.addEventListener('scroll', checkpointWorkspace, true);
-  window.addEventListener('pagehide', () => { checkpointWorkspace(); localWorkspace.flush(); });
+  window.addEventListener('pagehide', () => { checkpointWorkspace(); localWorkspace.departing(); });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') { checkpointWorkspace(); localWorkspace.flush(); }
   });
